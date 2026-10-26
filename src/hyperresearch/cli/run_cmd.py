@@ -47,9 +47,11 @@ def run_init(
     profile: str = typer.Option("full", "--profile", help="Pipeline profile for this run"),
     budget: float | None = typer.Option(None, "--budget", help="Hard ceiling on estimated API-equivalent spend (the run blocks when the estimate crosses it; a value measure, not a bill, on subscription billing)"),
     query_file: str | None = typer.Option(None, "--query-file", help="File whose verbatim contents become runs/<tag>/query.md"),
+    session_id: str | None = typer.Option(None, "--session-id", help="Codex session owner for a new run (defaults to unambiguous CODEX_SESSION_ID / CODEX_THREAD_ID)"),
     json_output: bool = typer.Option(False, "--json", "-j", help="JSON output"),
 ) -> None:
     """Scaffold research/runs/<vault_tag>/ with a fresh manifest (idempotent)."""
+    import os
     from pathlib import Path
 
     from hyperresearch.core.runs import RunError, init_run
@@ -59,7 +61,10 @@ def run_init(
     if query_file:
         query = Path(query_file).read_text(encoding="utf-8-sig")
     try:
-        manifest = init_run(vault, vault_tag, profile=profile, budget_usd=budget, query=query)
+        if session_id is None:
+            owners = {os.environ[key] for key in ("CODEX_SESSION_ID", "CODEX_THREAD_ID") if os.environ.get(key)}
+            session_id = next(iter(owners)) if len(owners) == 1 else None
+        manifest = init_run(vault, vault_tag, profile=profile, budget_usd=budget, query=query, session_id=session_id)
     except (RunError, VaultError) as e:
         if json_output:
             output(error(str(e), "RUN_ERROR"), json_mode=True)
@@ -163,7 +168,7 @@ def run_resume(
 ) -> None:
     """Print the exact position a recovering orchestrator should continue from."""
     from hyperresearch.core.hooks import step_skill_slug
-    from hyperresearch.core.runs import RunError, load_manifest, resume_position, set_status
+    from hyperresearch.core.runs import RunError, load_manifest, run_resume_position, set_status
 
     vault = _vault_or_exit(json_output)
     tag = _resolve_tag(vault, vault_tag, json_output)
@@ -176,7 +181,7 @@ def run_resume(
             console.print(f"[red]Error:[/] {e}")
         raise typer.Exit(1)
 
-    position = resume_position(manifest)
+    position = run_resume_position(vault, manifest)
     if manifest["status"] in ("paused", "blocked", "failed"):
         set_status(vault, tag, "running")
 
@@ -189,6 +194,8 @@ def run_resume(
         # string substitution — "2" must come back as the invokable
         # `hyperresearch-2-width-sweep`, never a bare `hyperresearch-2`.
         "skill_to_invoke": step_skill_slug(position["next_step"]),
+        # Codex has no step skills: the orchestrator reads this file instead.
+        "codex_step_file": _codex_step_file(step_skill_slug(position["next_step"])),
     }
     if json_output:
         output(success(data, vault=str(vault.root)), json_mode=True)
@@ -198,6 +205,68 @@ def run_resume(
         else:
             console.print(f"[green]{tag}[/] — resume at step {position['next_step']}")
             console.print(f"  Skill(skill: \"{data['skill_to_invoke']}\")")
+
+
+def _codex_step_file(skill: str | None) -> str | None:
+    """Project-relative path of a step's Codex procedure file, or None."""
+    if skill is None:
+        return None
+    from hyperresearch.core.platforms import CODEX, paths_for
+
+    return f"{paths_for(CODEX).steps_dir}/{skill}.md"
+
+
+@app.command("stop-gate", hidden=True)
+def run_stop_gate() -> None:
+    """Codex Stop hook: block only for a uniquely session-owned run mid-pipeline.
+
+    Reads the hook's JSON input on stdin. Prints one
+    `{"decision": "block", "reason": ...}` object when the uniquely owned run is
+    running, was touched in the last 6 hours, and has a next step; prints
+    nothing otherwise. Always exits 0 and never raises — a broken gate must
+    not wedge the agent. Set HYPERRESEARCH_STOP_GATE=0 to disable.
+    """
+    import os
+    import sys
+
+    try:
+        from hyperresearch.core.codex import STOP_GATE_ENV, stop_gate_decision, valid_session_id
+
+        if os.environ.get(STOP_GATE_ENV, "").strip().lower() in ("0", "false", "no", "off"):
+            return
+        try:
+            raw = sys.stdin.read() if sys.stdin is not None else ""
+            payload = json.loads(raw) if raw.strip() else {}
+        except (OSError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        # Already continuing because of a previous block: let it stop, or a
+        # run that can't advance would loop forever.
+        if payload.get("hook_event_name") != "Stop" or payload.get("stop_hook_active") is not False:
+            return
+        session_id = payload.get("session_id")
+        if not valid_session_id(session_id):
+            return
+
+        from pathlib import Path
+
+        from hyperresearch.core.vault import Vault
+
+        cwd = payload.get("cwd")
+        if not isinstance(cwd, str) or not cwd or not Path(cwd).is_absolute():
+            return
+        start = Path(cwd)
+        try:
+            vault = Vault.discover(start)
+        except VaultError:
+            return
+        decision = stop_gate_decision(vault, session_id=session_id)
+        if decision is not None:
+            sys.stdout.write(json.dumps(decision) + "\n")
+            sys.stdout.flush()
+    except Exception:
+        return
 
 
 @app.command("abort")
