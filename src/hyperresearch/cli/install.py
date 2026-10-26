@@ -41,10 +41,13 @@ def install(
         "-t",
         help="Agent runtime to install for: claude (Claude Code), codex (OpenAI Codex CLI), or all. Applies to normal, --global, and --steps-only installs.",
     ),
+    stop_hook: bool = typer.Option(True, "--stop-hook/--no-stop-hook", help="Install the Codex project Stop hook. Opting out skips enforcement setup and preserves existing hooks."),
 ) -> None:
     """Install hyperresearch: init vault + inject agent docs + install agent hooks/skills."""
     import sys
 
+    from hyperresearch.core.agent_docs import _resolve_executable
+    from hyperresearch.core.codex import CodexInstallError, executable_token
     from hyperresearch.core.hooks import (
         _install_codex_stop_hook,
         _install_hyperresearch_step_skills,
@@ -66,6 +69,32 @@ def install(
         else:
             console.print(f"[red]Error:[/] {msg}")
         raise typer.Exit(1)
+
+    def _codex_failure(exc: CodexInstallError) -> None:
+        if json_output:
+            output(error(str(exc), "CODEX_INSTALL_ERROR"), json_mode=True)
+        else:
+            console.print(f"[red]Codex install failed:[/] {exc}")
+        raise typer.Exit(1)
+
+    hpr_path = _resolve_executable()
+    if CODEX in targets:
+        try:
+            executable_token(hpr_path)
+        except CodexInstallError as exc:
+            _codex_failure(exc)
+
+    def _project_stop_hook(root: Path, *, check_only: bool = False) -> str | None:
+        if CODEX not in targets or not stop_hook:
+            return None
+        try:
+            return _install_codex_stop_hook(root, hpr_path, check_only=check_only)
+        except CodexInstallError as exc:
+            _codex_failure(exc)
+
+    stop_hook_status = "installed" if stop_hook else "skipped-by-request"
+    if CODEX in targets and not stop_hook and not json_output:
+        console.print("[yellow]Codex Stop hook installation skipped by request; enforcement setup is incomplete and existing hooks are preserved.[/]")
 
     # No explicit --profile → use the gear persisted by `hpr profile use`
     # in the target's config (falling back to "full").
@@ -101,9 +130,7 @@ def install(
         steps_config_path = steps_config if steps_config.exists() else None
         steps_profile = _default_profile(steps_config_path)
         _check_profile(steps_profile, steps_config_path)
-        from hyperresearch.core.agent_docs import _resolve_executable
-
-        hpr_path = _resolve_executable()
+        hook = _project_stop_hook(target_dir)
         results: list[tuple[str, str | None]] = []
         for platform in targets:
             _set_render_state(steps_profile, steps_config_path, platform)
@@ -111,7 +138,6 @@ def install(
             if platform == CODEX:
                 # The Stop gate is what keeps a Codex session on the pipeline;
                 # a project bootstrapped from a global install needs it too.
-                hook = _install_codex_stop_hook(target_dir, hpr_path)
                 result = " | ".join(r for r in (result, hook) if r) or None
             results.append((platform, result))
         if json_output:
@@ -120,6 +146,7 @@ def install(
                 "steps_installed": " | ".join(done) if done else None,
                 "target": str(target_dir),
                 "targets": targets,
+                "stop_hook": stop_hook_status if CODEX in targets else "not-requested",
             }
             output(success(data, vault=None), json_mode=True)
             return
@@ -138,9 +165,6 @@ def install(
     # per-project, lazily, when the entry skill bootstrap calls
     # `hyperresearch install --steps-only .` on first invocation.
     if global_install:
-        from hyperresearch.core.agent_docs import _resolve_executable
-
-        hpr_path = _resolve_executable()
         home = Path.home()
         global_profile = profile if profile is not None else "full"
         _check_profile(global_profile, None)
@@ -202,6 +226,9 @@ def install(
         return
 
     root = Path(path).resolve()
+    # Read/merge preflight must precede Vault.init and its scaffold/docs writes.
+    # The actual hook write remains after vault/profile setup; it revalidates.
+    _project_stop_hook(root, check_only=True)
 
     # First-time install in an interactive terminal → run the setup TUI instead
     # (The setup TUI configures a Claude Code install; other targets skip it.)
@@ -229,9 +256,7 @@ def install(
             raise typer.Exit(1)
 
     # Step 2: Resolve the hyperresearch executable path
-    from hyperresearch.core.agent_docs import _resolve_executable, inject_agent_docs
-
-    hpr_path = _resolve_executable()
+    from hyperresearch.core.agent_docs import inject_agent_docs
 
     # Validate the gear before any per-target file is written.
     project_config = root / ".hyperresearch" / "config.toml"
@@ -241,6 +266,9 @@ def install(
 
     doc_actions: list[str] = []
     hook_actions: list[str] = []
+    hook = _project_stop_hook(root)
+    if hook:
+        hook_actions.append(hook)
     for platform in targets:
         # Step 3: Always re-inject the platform's docs file (CLAUDE.md /
         # AGENTS.md — updates blurb + path)
@@ -249,7 +277,7 @@ def install(
         # Step 4: Install the platform's hook + skills + subagents (rendered
         # from the gear profile — explicit --profile, else the persisted gear)
         hook_actions += install_hooks(
-            root, hpr_path=hpr_path, profile=project_profile, platform=platform
+            root, hpr_path=hpr_path, profile=project_profile, platform=platform, stop_hook=False
         )
 
     # Step 3: Auto-configure crawl4ai if installed
@@ -263,6 +291,7 @@ def install(
         "hooks_installed": hook_actions,
         "crawl4ai": crawl4ai_status,
         "targets": targets,
+        "stop_hook": stop_hook_status if CODEX in targets else "not-requested",
     }
 
     if json_output:

@@ -1,8 +1,9 @@
 """The crawl4ai headless lane verifies TLS certificates by default (#137).
 
-crawl4ai defaults ``BrowserConfig.ignore_https_errors`` to True AND launches
-Chromium with ``--ignore-certificate-errors`` unconditionally, so verifying
-takes both a config value and stripping those launch flags. These tests pin
+crawl4ai releases such as 0.8.6 defaulted ``BrowserConfig.ignore_https_errors``
+to True AND supplied ``--ignore-certificate-errors`` launch flags; 0.9.5 no
+longer supplies those flags by default. Verification must cover both the
+config value and any insecure flags a builder supplies. These tests pin
 both halves, the ``[fetch] browser_verify_tls = false`` opt-out, and the
 refusal message. All offline: object construction and fake crawlers only,
 no browser launch, no network.
@@ -123,16 +124,66 @@ def test_stripping_is_per_instance_not_global():
     from crawl4ai.browser_manager import ManagedBrowser
 
     inst = provider.Crawl4AIProvider(headless=True, user_data_dir="/tmp/does-not-matter")
+    builder = ManagedBrowser.build_browser_flags
+    original = builder(inst._browser_config)
     inst._make_crawler()
-    assert set(ManagedBrowser.build_browser_flags(inst._browser_config)) >= CERT_FLAGS
+    assert ManagedBrowser.build_browser_flags is builder
+    assert ManagedBrowser.build_browser_flags(inst._browser_config) == original
 
 
 def test_opt_out_keeps_crawl4ai_launch_flags():
+    from crawl4ai.browser_manager import BrowserManager
+
+    builder = BrowserManager._build_browser_args
     inst = provider.Crawl4AIProvider(
         headless=True, settings=FetchSettings(browser_verify_tls=False)
     )
-    args = inst._make_crawler().crawler_strategy.browser_manager._build_browser_args()["args"]
-    assert set(args) >= CERT_FLAGS
+    manager = inst._make_crawler().crawler_strategy.browser_manager
+    assert BrowserManager._build_browser_args is builder
+    assert manager._build_browser_args() == builder(manager)
+
+
+@pytest.mark.parametrize("profile_dir", [None, "/tmp/does-not-matter"])
+@pytest.mark.parametrize("verify_tls", [True, False])
+def test_insecure_vendor_flags_are_stripped_only_on_verified_instances(monkeypatch, profile_dir, verify_tls):
+    """Supply real insecure inputs even when the installed vendor is secure.
+
+    Class identity and raw output assertions catch a global class mutation;
+    opt-out assertions also detect unconditional stripping of caller options.
+    """
+    from crawl4ai.browser_manager import BrowserManager, ManagedBrowser
+
+    if profile_dir is None:
+        original = BrowserManager._build_browser_args
+
+        def insecure_builder(manager):
+            result = dict(original(manager))
+            result["args"] = [*result["args"], *sorted(CERT_FLAGS)]
+            return result
+
+        monkeypatch.setattr(BrowserManager, "_build_browser_args", insecure_builder)
+    else:
+        original = ManagedBrowser.build_browser_flags
+
+        def insecure_builder(config):
+            return [*original(config), *sorted(CERT_FLAGS)]
+
+        monkeypatch.setattr(ManagedBrowser, "build_browser_flags", staticmethod(insecure_builder))
+
+    inst = provider.Crawl4AIProvider(headless=True, user_data_dir=profile_dir, settings=FetchSettings(browser_verify_tls=verify_tls))
+    manager = inst._make_crawler().crawler_strategy.browser_manager
+    if profile_dir is None:
+        assert BrowserManager._build_browser_args is insecure_builder
+        assert set(insecure_builder(manager)["args"]) >= CERT_FLAGS
+        actual = manager._build_browser_args()["args"]
+    else:
+        assert ManagedBrowser.build_browser_flags is insecure_builder
+        assert set(insecure_builder(inst._browser_config)) >= CERT_FLAGS
+        actual = manager.managed_browser.build_browser_flags(inst._browser_config)
+    if verify_tls:
+        assert not CERT_FLAGS & set(actual)
+    else:
+        assert set(actual) >= CERT_FLAGS
 
 
 def test_missing_flag_builder_fails_closed():

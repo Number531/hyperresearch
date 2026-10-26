@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
+import subprocess
 import tomllib
 from datetime import UTC, datetime, timedelta
 
@@ -332,20 +335,20 @@ def test_stop_hook_merge_preserves_foreign_hooks(tmp_vault):
                 {"hooks": [{"type": "command", "command": "/old/hyperresearch run stop-gate"}]},
             ],
         },
-        "other": 1,
+        "description": "Preserve my hooks",
     }
     hooks_path.write_text(json.dumps(foreign), encoding="utf-8")
 
-    assert _install_codex_stop_hook(tmp_vault.root, "C:/Program Files/hpr.exe")
+    assert _install_codex_stop_hook(tmp_vault.root, "hyperresearch")
     merged = json.loads(hooks_path.read_text(encoding="utf-8"))
-    assert merged["other"] == 1
+    assert merged["description"] == foreign["description"]
     assert merged["hooks"]["PreToolUse"] == foreign["hooks"]["PreToolUse"]
     commands = [e["hooks"][0]["command"] for e in merged["hooks"]["Stop"]]
     # Foreign Stop entry kept, our old entry replaced (exactly one of ours)
-    assert commands == ["notify-done", '"C:/Program Files/hpr.exe" run stop-gate']
+    assert commands == ["notify-done", "hyperresearch run stop-gate"]
 
     # Idempotent
-    assert _install_codex_stop_hook(tmp_vault.root, "C:/Program Files/hpr.exe") is None
+    assert _install_codex_stop_hook(tmp_vault.root, "hyperresearch") is None
 
 
 def test_stop_hook_leaves_unparseable_hooks_json_alone(tmp_vault):
@@ -354,14 +357,139 @@ def test_stop_hook_leaves_unparseable_hooks_json_alone(tmp_vault):
     hooks_path = tmp_vault.root / ".codex" / "hooks.json"
     hooks_path.parent.mkdir(parents=True)
     hooks_path.write_text("{ not json", encoding="utf-8")
-    result = _install_codex_stop_hook(tmp_vault.root, "hyperresearch")
-    assert result and "NOT installed" in result
+    with pytest.raises(codex.CodexInstallError, match="existing file preserved"):
+        _install_codex_stop_hook(tmp_vault.root, "hyperresearch")
     assert hooks_path.read_text(encoding="utf-8") == "{ not json"
 
 
-def test_stop_hook_command_quotes_only_paths_with_spaces():
-    assert codex.stop_hook_command("C:\\venv\\hpr.exe") == "C:/venv/hpr.exe run stop-gate"
-    assert codex.stop_hook_command("/a b/hpr") == '"/a b/hpr" run stop-gate'
+def test_stop_hook_preserves_foreign_commands_in_mixed_entries():
+    foreign = {"type": "command", "command": "echo run stop-gate"}
+    settings = {"hooks": {"Stop": [{"matcher": "keep", "hooks": [{"type": "command", "command": "/old/hyperresearch run stop-gate"}, foreign]}]}}
+    merged = codex.merge_stop_hook(settings, "hyperresearch")
+    assert merged["hooks"]["Stop"][0] == {"matcher": "keep", "hooks": [{"type": "command", "command": "hyperresearch run stop-gate"}, foreign]}
+    assert len(settings["hooks"]["Stop"][0]["hooks"]) == 2
+
+
+def test_stop_hook_owned_only_group_preserves_matcher_and_opaque_metadata():
+    settings = {"hooks": {"Stop": [{"matcher": "custom", "opaque_group": {"value": 1}, "hooks": [{"type": "command", "command": "/old/hyperresearch run stop-gate", "opaque_handler": {"value": 2}, "timeout": 20}]}]}}
+    expected = json.loads(json.dumps(settings))
+    expected["hooks"]["Stop"][0]["hooks"][0]["command"] = "hyperresearch run stop-gate"
+    assert codex.merge_stop_hook(settings, "hyperresearch") == expected
+    assert settings["hooks"]["Stop"][0]["hooks"][0]["command"] == "/old/hyperresearch run stop-gate"
+
+
+@pytest.mark.parametrize("handlers", [[{"type": "command", "command": "/old/hyperresearch run stop-gate"}, {"type": "command", "command": "hyperresearch run stop-gate"}], [{"type": "command", "command": "hyperresearch run stop-gate", "async": True}], [{"type": "command", "command": "hyperresearch run stop-gate", "commandWindows": "other"}], [{"type": "command", "command": "hyperresearch run stop-gate", "command_windows": "other"}]])
+def test_stop_hook_ambiguous_owned_configuration_fails_without_writing(tmp_vault, handlers):
+    from hyperresearch.core.hooks import _install_codex_stop_hook
+
+    path = tmp_vault.root / ".codex/hooks.json"
+    path.parent.mkdir()
+    original = json.dumps({"hooks": {"Stop": [{"hooks": handlers}]}})
+    path.write_text(original, encoding="utf-8")
+    with pytest.raises(codex.CodexInstallError, match="existing file preserved"):
+        _install_codex_stop_hook(tmp_vault.root, "hyperresearch")
+    assert path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("stop", [[None], [{"hooks": None}], [{"hooks": [None]}], [{"hooks": [{"type": "command", "command": []}]}]])
+def test_stop_hook_rejects_malformed_stop_entries(tmp_vault, stop):
+    from hyperresearch.core.hooks import _install_codex_stop_hook
+
+    path = tmp_vault.root / ".codex/hooks.json"
+    path.parent.mkdir()
+    original = json.dumps({"hooks": {"Stop": stop}})
+    path.write_text(original, encoding="utf-8")
+    with pytest.raises(codex.CodexInstallError):
+        _install_codex_stop_hook(tmp_vault.root, "hyperresearch")
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_stop_hook_preserves_valid_foreign_types_and_nested_extensions():
+    foreign = [{"type": "mcp_tool", "server": "local", "tool": "notify", "input": {"result": "done"}, "extension": 1}, {"type": "prompt", "prompt": "opaque"}, {"type": "agent", "command": "hyperresearch run stop-gate"}]
+    settings = {"hooks": {"Stop": [{"hooks": foreign, "extension": 2}, {}, {"hooks": []}], "FutureEvent": {"opaque": True}}}
+    merged = codex.merge_stop_hook(settings, "hyperresearch")
+    assert merged["hooks"]["Stop"][:-1] == settings["hooks"]["Stop"]
+    assert merged["hooks"]["FutureEvent"] == {"opaque": True}
+
+
+@pytest.mark.parametrize("settings", [{"other": 1}, {"description": []}, {"hooks": {"PreToolUse": {}}}, {"hooks": {"PreToolUse": [{"matcher": 1}]}}, {"hooks": {"Stop": [{"hooks": [{"type": "unknown"}]}]}}, {"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "notify", "async": "false"}]}]}}, {"hooks": {"Stop": [{"hooks": [{"type": "mcp_tool", "server": "local", "tool": "notify", "input": {"value": None}}]}]}}])
+def test_stop_hook_rejects_incompatible_known_settings_without_mutation(tmp_vault, settings):
+    from hyperresearch.core.hooks import _install_codex_stop_hook
+
+    path = tmp_vault.root / ".codex/hooks.json"
+    path.parent.mkdir()
+    original = json.dumps(settings)
+    path.write_text(original, encoding="utf-8")
+    with pytest.raises(codex.CodexInstallError):
+        _install_codex_stop_hook(tmp_vault.root, "hyperresearch")
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_executable_token_uses_the_supported_runner_grammar():
+    assert codex.executable_token("C:\\venv\\hpr.exe", windows=True) == "C:/venv/hpr.exe"
+    assert codex.executable_token("/a b/hpr", windows=False) == "'/a b/hpr'"
+    for path in ["C:/Program Files/hpr.exe", "hpr&whoami", "hpr%PATH%", "hpr!PATH!", "hpr^echo", 'hpr"quote', "hpr;other", "hpr$(other)", "hpr`other`"]:
+        with pytest.raises(codex.CodexInstallError):
+            codex.executable_token(path, windows=True)
+    with pytest.raises(codex.CodexInstallError):
+        codex.executable_token("C:\\venv\\hpr.exe", windows=False)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Exercises the supported POSIX command runner")
+@pytest.mark.parametrize("name", ["hpr space", "hpr'quote", 'hpr"quote', "hpr$(touch INJECTED)", "hpr`touch INJECTED`", "hpr;touch INJECTED", "hpr&touch INJECTED", "hpr|cat"])
+def test_codex_executable_tokens_execute_literally(tmp_path, name):
+    from hyperresearch.core import hooks
+
+    exe = tmp_path / name
+    exe.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n', encoding="utf-8")
+    exe.chmod(0o700)
+    hooks._set_render_state("full", None, "codex")
+    commands = [codex.stop_hook_command(str(exe)), hooks._render_installed("{hpr_path} run stop-gate", str(exe), header=False)]
+    for command in commands:
+        result = subprocess.run(["/bin/sh", "-c", command], cwd=tmp_path, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "run\nstop-gate\n"
+        assert not (tmp_path / "INJECTED").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable rendering")
+def test_codex_all_generated_commands_quote_the_executable(tmp_vault, monkeypatch):
+    from hyperresearch.core.agent_docs import inject_agent_docs
+
+    executable = "/a b/hpr'$(echo marker);`echo marker`"
+    token = shlex.quote(executable)
+    install_hooks(tmp_vault.root, executable, platform="codex")
+    monkeypatch.setattr("hyperresearch.core.agent_docs._resolve_executable", lambda: executable)
+    inject_agent_docs(tmp_vault.root, platform="codex")
+    assert token + " run resume" in (tmp_vault.root / "AGENTS.md").read_text(encoding="utf-8")
+    assert token + " fetch" in _load_agents(tmp_vault.root)["hyperresearch-fetcher.toml"]["developer_instructions"]
+    skill = tmp_vault.root / ".agents/skills/hyperresearch/SKILL.md"
+    assert token in skill.read_text(encoding="utf-8")
+
+
+def test_stop_gate_is_session_owned_and_never_uses_the_newest_run(tmp_vault):
+    from hyperresearch.core.runs import init_run
+
+    init_run(tmp_vault, "session-a-run", session_id="session-a")
+    init_run(tmp_vault, "session-b-run", session_id="session-b")
+    assert "session-a-run is at step" in codex.stop_gate_decision(tmp_vault, session_id="session-a")["reason"]
+    assert "session-b-run is at step" in codex.stop_gate_decision(tmp_vault, session_id="session-b")["reason"]
+    assert codex.stop_gate_decision(tmp_vault, session_id="unrelated") is None
+    assert codex.stop_gate_decision(tmp_vault) is None
+    init_run(tmp_vault, "ambiguous-a-run", session_id="session-a")
+    assert codex.stop_gate_decision(tmp_vault, session_id="session-a") is None
+
+
+def test_run_init_does_not_rebind_existing_or_legacy_runs(tmp_vault):
+    from hyperresearch.core.runs import RunError, init_run
+
+    owned = init_run(tmp_vault, "owned", session_id="session-a")
+    assert init_run(tmp_vault, "owned", session_id="session-a") == owned
+    with pytest.raises(RunError, match="session"):
+        init_run(tmp_vault, "owned", session_id="session-b")
+    legacy = init_run(tmp_vault, "legacy")
+    assert init_run(tmp_vault, "legacy", session_id="session-a") == legacy
+    assert "codex_session_id" not in legacy
 
 
 # ---------------------------------------------------------------------------
@@ -376,9 +504,9 @@ def test_stop_gate_no_runs(tmp_vault):
 def test_stop_gate_blocks_in_progress_run(tmp_vault):
     from hyperresearch.core.runs import init_run, set_step
 
-    init_run(tmp_vault, "gate-run")
+    init_run(tmp_vault, "gate-run", session_id="session-a")
     set_step(tmp_vault, "gate-run", "1", "done")
-    decision = codex.stop_gate_decision(tmp_vault)
+    decision = codex.stop_gate_decision(tmp_vault, session_id="session-a")
     assert decision is not None
     assert decision["decision"] == "block"
     assert "gate-run is at step 2 (hyperresearch-2-width-sweep)" in decision["reason"]
@@ -390,13 +518,13 @@ def test_stop_gate_follows_declared_light_tier(tmp_vault):
     orchestrator to step 10, never to a step the tier skips."""
     from hyperresearch.core.runs import init_run, set_step
 
-    init_run(tmp_vault, "gate-run", profile="full")
+    init_run(tmp_vault, "gate-run", profile="full", session_id="session-a")
     (tmp_vault.run_dir("gate-run") / "prompt-decomposition.json").write_text(
         json.dumps({"pipeline_tier": "light"}), encoding="utf-8"
     )
     set_step(tmp_vault, "gate-run", "1", "done")
     set_step(tmp_vault, "gate-run", "2", "done")
-    decision = codex.stop_gate_decision(tmp_vault)
+    decision = codex.stop_gate_decision(tmp_vault, session_id="session-a")
     assert decision is not None
     assert "gate-run is at step 10 (hyperresearch-10-triple-draft)" in decision["reason"]
 
@@ -405,28 +533,28 @@ def test_stop_gate_follows_declared_light_tier(tmp_vault):
 def test_stop_gate_silent_for_inactive_runs(tmp_vault, status):
     from hyperresearch.core.runs import init_run, set_status
 
-    init_run(tmp_vault, "gate-run")
+    init_run(tmp_vault, "gate-run", session_id="session-a")
     set_status(tmp_vault, "gate-run", status, blocked_on="x" if status == "blocked" else None)
-    assert codex.stop_gate_decision(tmp_vault) is None
+    assert codex.stop_gate_decision(tmp_vault, session_id="session-a") is None
 
 
 def test_stop_gate_silent_when_all_steps_done(tmp_vault):
     from hyperresearch.core.runs import init_run, load_manifest, set_step
 
-    init_run(tmp_vault, "gate-run", profile="light")
+    init_run(tmp_vault, "gate-run", profile="light", session_id="session-a")
     for step in load_manifest(tmp_vault, "gate-run")["profile_steps"]:
         set_step(tmp_vault, "gate-run", step, "done")
-    assert codex.stop_gate_decision(tmp_vault) is None
+    assert codex.stop_gate_decision(tmp_vault, session_id="session-a") is None
 
 
 def test_stop_gate_silent_for_stale_run(tmp_vault):
     from hyperresearch.core.runs import init_run
 
-    init_run(tmp_vault, "gate-run")
+    init_run(tmp_vault, "gate-run", session_id="session-a")
     later = datetime.now(UTC) + timedelta(hours=7)
-    assert codex.stop_gate_decision(tmp_vault, now=later) is None
+    assert codex.stop_gate_decision(tmp_vault, now=later, session_id="session-a") is None
     soon = datetime.now(UTC) + timedelta(hours=5)
-    assert codex.stop_gate_decision(tmp_vault, now=soon) is not None
+    assert codex.stop_gate_decision(tmp_vault, now=soon, session_id="session-a") is not None
 
 
 # ---------------------------------------------------------------------------

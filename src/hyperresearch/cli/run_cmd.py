@@ -47,9 +47,11 @@ def run_init(
     profile: str = typer.Option("full", "--profile", help="Pipeline profile for this run"),
     budget: float | None = typer.Option(None, "--budget", help="Hard ceiling on estimated API-equivalent spend (the run blocks when the estimate crosses it; a value measure, not a bill, on subscription billing)"),
     query_file: str | None = typer.Option(None, "--query-file", help="File whose verbatim contents become runs/<tag>/query.md"),
+    session_id: str | None = typer.Option(None, "--session-id", help="Codex session owner for a new run (defaults to unambiguous CODEX_SESSION_ID / CODEX_THREAD_ID)"),
     json_output: bool = typer.Option(False, "--json", "-j", help="JSON output"),
 ) -> None:
     """Scaffold research/runs/<vault_tag>/ with a fresh manifest (idempotent)."""
+    import os
     from pathlib import Path
 
     from hyperresearch.core.runs import RunError, init_run
@@ -59,7 +61,10 @@ def run_init(
     if query_file:
         query = Path(query_file).read_text(encoding="utf-8-sig")
     try:
-        manifest = init_run(vault, vault_tag, profile=profile, budget_usd=budget, query=query)
+        if session_id is None:
+            owners = {os.environ[key] for key in ("CODEX_SESSION_ID", "CODEX_THREAD_ID") if os.environ.get(key)}
+            session_id = next(iter(owners)) if len(owners) == 1 else None
+        manifest = init_run(vault, vault_tag, profile=profile, budget_usd=budget, query=query, session_id=session_id)
     except (RunError, VaultError) as e:
         if json_output:
             output(error(str(e), "RUN_ERROR"), json_mode=True)
@@ -213,10 +218,10 @@ def _codex_step_file(skill: str | None) -> str | None:
 
 @app.command("stop-gate", hidden=True)
 def run_stop_gate() -> None:
-    """Codex Stop hook: block ending the session while the newest run is mid-pipeline.
+    """Codex Stop hook: block only for a uniquely session-owned run mid-pipeline.
 
     Reads the hook's JSON input on stdin. Prints one
-    `{"decision": "block", "reason": ...}` object when the newest run is
+    `{"decision": "block", "reason": ...}` object when the uniquely owned run is
     running, was touched in the last 6 hours, and has a next step; prints
     nothing otherwise. Always exits 0 and never raises — a broken gate must
     not wedge the agent. Set HYPERRESEARCH_STOP_GATE=0 to disable.
@@ -225,7 +230,7 @@ def run_stop_gate() -> None:
     import sys
 
     try:
-        from hyperresearch.core.codex import STOP_GATE_ENV, stop_gate_decision
+        from hyperresearch.core.codex import STOP_GATE_ENV, stop_gate_decision, valid_session_id
 
         if os.environ.get(STOP_GATE_ENV, "").strip().lower() in ("0", "false", "no", "off"):
             return
@@ -238,7 +243,10 @@ def run_stop_gate() -> None:
             payload = {}
         # Already continuing because of a previous block: let it stop, or a
         # run that can't advance would loop forever.
-        if payload.get("stop_hook_active"):
+        if payload.get("hook_event_name") != "Stop" or payload.get("stop_hook_active") is not False:
+            return
+        session_id = payload.get("session_id")
+        if not valid_session_id(session_id):
             return
 
         from pathlib import Path
@@ -246,12 +254,14 @@ def run_stop_gate() -> None:
         from hyperresearch.core.vault import Vault
 
         cwd = payload.get("cwd")
-        start = Path(cwd) if isinstance(cwd, str) and cwd else None
+        if not isinstance(cwd, str) or not cwd or not Path(cwd).is_absolute():
+            return
+        start = Path(cwd)
         try:
             vault = Vault.discover(start)
         except VaultError:
             return
-        decision = stop_gate_decision(vault)
+        decision = stop_gate_decision(vault, session_id=session_id)
         if decision is not None:
             sys.stdout.write(json.dumps(decision) + "\n")
             sys.stdout.flush()

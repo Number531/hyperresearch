@@ -219,7 +219,7 @@ This project uses hyperresearch as an agent-driven research knowledge base. The 
 
 **Run a research session with `$hyperresearch <query>`.** The entry skill at `.agents/skills/hyperresearch/SKILL.md` is a thin ROUTER for the V8 16-step pipeline. Each step's procedure is a plain file under `.hyperresearch/codex/steps/` (`hyperresearch-1-decompose.md` through `hyperresearch-16-readability-audit.md`, plus `hyperresearch-1-5-chapter-partition.md` and `hyperresearch-14-5-cite-check.md`). When the router says to run a step, read that file in full with the shell and follow it — one step at a time, recording each step with `{hpr} run step`.
 
-**Never answer a research request inline.** The deliverable is `research/notes/final_report_<vault_tag>.md`, produced by running the pipeline to the end. A Stop hook (`.codex/hooks.json` runs `{hpr} run stop-gate`) blocks ending the session while the newest run is mid-pipeline; set `HYPERRESEARCH_STOP_GATE=0` to disable it.
+**Never answer a research request inline.** The deliverable is `research/notes/final_report_<vault_tag>.md`, produced by running the pipeline to the end. A Stop hook (`.codex/hooks.json` runs `{hpr} run stop-gate`) blocks ending the session only while one run explicitly owned by this Codex session is mid-pipeline. New `run init` commands bind the owner from matching `CODEX_SESSION_ID` / `CODEX_THREAD_ID` shell environment values, or explicit `--session-id <session-id>`. Missing, unrelated, or ambiguous ownership permits stopping; legacy runs are never automatically adopted. Set `HYPERRESEARCH_STOP_GATE=0` to disable the gate.
 
 Subagents are Codex custom agents defined in `.codex/agents/hyperresearch-*.toml` (fetcher, source-analyst, loci-analyst, depth-investigator, corpus-critic, draft-orchestrator, synthesizer, 4 critics, patcher, cite-checker, polish-auditor, readability-recommender). Spawn them only where a step file says to, by name, passing the message the step file specifies; when it says to spawn several in parallel, spawn them all in one turn and wait for all of them. Subagents cannot spawn subagents.
 
@@ -309,7 +309,12 @@ def inject_agent_docs(vault_root: Path, platform: str = "claude") -> list[str]:
     check_platform(platform)
     hpr_path = _resolve_executable()
     # Use forward slashes — bash on Windows eats backslashes
-    hpr_path = hpr_path.replace("\\", "/")
+    if platform == CODEX:
+        from hyperresearch.core.codex import executable_token
+
+        hpr_path = executable_token(hpr_path)
+    else:
+        hpr_path = hpr_path.replace("\\", "/")
     # No date interpolation here: a `Today is YYYY-MM-DD` line in the
     # cached prefix would bust Claude Code's prompt cache once per day.
     template = HYPERRESEARCH_CODEX_BLURB if platform == CODEX else HYPERRESEARCH_BLURB

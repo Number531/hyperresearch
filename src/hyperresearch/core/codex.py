@@ -18,13 +18,15 @@ and no Read/Write/Edit tools. This module converts one to the other:
 
 It also owns the Codex Stop hook (`.codex/hooks.json`) and the decision
 logic behind `hyperresearch run stop-gate`, which keeps a Codex session from
-ending while the newest run is mid-pipeline — Codex's documented failure mode
+ending while its explicitly owned run is mid-pipeline — Codex's documented failure mode
 on this pipeline is answering the question inline and skipping the steps.
 """
 
 from __future__ import annotations
 
+import os
 import re
+import shlex
 from datetime import UTC, datetime, timedelta
 
 import yaml
@@ -286,43 +288,151 @@ policy:
 STOP_GATE_SUBCOMMAND = "run stop-gate"
 
 
-def stop_hook_command(hpr_path: str) -> str:
-    """The Stop hook command line — the resolved CLI path plus the subcommand.
+class CodexInstallError(ValueError):
+    """The requested Codex install cannot safely represent or merge its files."""
 
-    The path is quoted only when it contains whitespace: a bare path runs
-    unchanged under sh, cmd, and PowerShell, while a quoted leading token is
-    a parse error in PowerShell (it wants `& "..."`).
+
+def executable_token(hpr_path: str, *, windows: bool | None = None) -> str:
+    """Encode one executable for Codex's shell-string commands.
+
+    POSIX hooks use a shell, so the executable is always one shell token.
+    Windows hooks use COMSPEC /C: only quote-free paths are supported here;
+    spaces, expansion and shell operators require a separate Windows renderer.
+    Generated command examples have the same supported shell boundary.
     """
-    exe = hpr_path.replace("\\", "/")
-    if any(ch.isspace() for ch in exe):
-        exe = f'"{exe}"'
-    return f"{exe} {STOP_GATE_SUBCOMMAND}"
+    if not hpr_path or any(ord(c) < 32 or ord(c) == 127 for c in hpr_path):
+        raise CodexInstallError("Codex executable path is empty or contains control characters")
+    windows = os.name == "nt" if windows is None else windows
+    if windows:
+        exe = hpr_path.replace("\\", "/")
+        if not re.fullmatch(r"[A-Za-z0-9_./:\-]+", exe):
+            raise CodexInstallError("Codex on Windows requires an executable path without spaces or shell metacharacters")
+        return exe
+    if re.match(r"^[A-Za-z]:", hpr_path) or hpr_path.startswith("\\\\"):
+        raise CodexInstallError("Windows executable paths require the Windows command runner")
+    return shlex.quote(hpr_path)
 
 
-def _is_our_stop_entry(entry) -> bool:
-    if not isinstance(entry, dict):
+def stop_hook_command(hpr_path: str) -> str:
+    """Codex command hooks accept a shell string, not an argument array."""
+    return f"{executable_token(hpr_path)} {STOP_GATE_SUBCOMMAND}"
+
+
+def _is_our_stop_hook(hook) -> bool:
+    if not isinstance(hook, dict) or hook.get("type") != "command":
         return False
-    hooks = entry.get("hooks")
-    if not isinstance(hooks, list):
+    command = hook.get("command")
+    if not isinstance(command, str):
         return False
-    return any(
-        isinstance(h, dict) and STOP_GATE_SUBCOMMAND in str(h.get("command", ""))
-        for h in hooks
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    return (
+        len(argv) == 3
+        and argv[1:] == ["run", "stop-gate"]
+        and argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower() in ("hyperresearch", "hyperresearch.exe", "hpr", "hpr.exe")
     )
+
+
+def _check_hook_settings(settings: dict) -> None:
+    """Reject incompatible known shapes without normalizing foreign fields.
+
+    Matches the parsing boundary in Codex 0.164's config/src/hook_config.rs:
+    root fields are closed; nested unknown fields/events remain opaque.
+    This is a structural merge guard, not a Codex runtime/trust validation.
+    """
+    def invalid() -> None:
+        raise CodexInstallError(".codex/hooks.json has an incompatible structure; existing file preserved. Fix it or use --no-stop-hook")
+
+    if set(settings) - {"description", "hooks"}:
+        invalid()
+    if settings.get("description") is not None and not isinstance(settings["description"], str):
+        invalid()
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict):
+        invalid()
+    known_events = {"PreModelRequest", "PostModelRequest", "PreToolUse", "PermissionRequest", "PostToolUse", "PreCompact", "PostCompact", "SessionStart", "SessionEnd", "UserPromptSubmit", "SubagentStart", "SubagentStop", "Stop", "Interrupt"}
+    for event in known_events.intersection(hooks):
+        groups = hooks[event]
+        if not isinstance(groups, list):
+            invalid()
+        for group in groups:
+            if not isinstance(group, dict) or (group.get("matcher") is not None and not isinstance(group["matcher"], str)):
+                invalid()
+            handlers = group.get("hooks", [])
+            if not isinstance(handlers, list):
+                invalid()
+            for handler in handlers:
+                if not isinstance(handler, dict):
+                    invalid()
+                kind = handler.get("type")
+                if kind not in ("command", "mcp_tool", "prompt", "agent"):
+                    invalid()
+                if kind in ("prompt", "agent"):
+                    continue
+                required = ("command",) if kind == "command" else ("server", "tool")
+                if any(not isinstance(handler.get(key), str) for key in required):
+                    invalid()
+                for key in ("timeout", "additionalContextLimit") if kind == "command" else ("timeout",):
+                    value = handler.get(key)
+                    if value is not None and (type(value) is not int or not 0 <= value < 2**64):
+                        invalid()
+                for key in ("statusMessage", "commandWindows", "command_windows") if kind == "command" else ("statusMessage",):
+                    if handler.get(key) is not None and not isinstance(handler[key], str):
+                        invalid()
+                if kind == "command":
+                    if "async" in handler and type(handler["async"]) is not bool:
+                        invalid()
+                    if "commandWindows" in handler and "command_windows" in handler:
+                        invalid()
+                elif "input" in handler:
+                    # MCP input must be an object representable as TOML; null
+                    # anywhere cannot participate in Codex's trust hashing.
+                    def toml_value(value) -> bool:
+                        if isinstance(value, dict):
+                            return all(toml_value(v) for v in value.values())
+                        if isinstance(value, list):
+                            return all(toml_value(v) for v in value)
+                        return value is not None and (type(value) is not int or -(2**63) <= value < 2**63)
+
+                    if not isinstance(handler["input"], dict) or not toml_value(handler["input"]):
+                        invalid()
 
 
 def merge_stop_hook(settings: dict, hpr_path: str) -> dict:
     """Return `settings` with exactly one hyperresearch Stop hook entry.
 
-    Foreign hooks — other events, and other Stop entries — are preserved in
-    order; only an existing stop-gate entry is replaced.
+    Update one owned handler in place, preserving all user fields and order.
+    Ambiguous ownership or modifiers we cannot safely replace raise an error
+    rather than discarding user data or reporting a working gate.
     """
+    command = stop_hook_command(hpr_path)
+    _check_hook_settings(settings)
     merged = dict(settings)
-    hooks = merged.get("hooks")
-    hooks = dict(hooks) if isinstance(hooks, dict) else {}
-    stop = hooks.get("Stop")
-    stop = [e for e in stop if not _is_our_stop_entry(e)] if isinstance(stop, list) else []
-    stop.append({"hooks": [{"type": "command", "command": stop_hook_command(hpr_path)}]})
+    hooks = merged.get("hooks", {})
+    if not isinstance(hooks, dict):
+        raise CodexInstallError(".codex/hooks.json hooks must be an object; existing file preserved")
+    hooks = dict(hooks)
+    stop = hooks.get("Stop", [])
+    if not isinstance(stop, list):
+        raise CodexInstallError(".codex/hooks.json Stop must be an array; existing file preserved")
+    owned = [(i, j) for i, entry in enumerate(stop) for j, h in enumerate(entry.get("hooks", [])) if _is_our_stop_hook(h) or (h.get("type") == "command" and h.get("command") == command)]
+    if len(owned) > 1:
+        raise CodexInstallError("Multiple Hyperresearch Stop commands are ambiguous; existing file preserved. Fix it or use --no-stop-hook")
+    stop = list(stop)
+    if owned:
+        i, j = owned[0]
+        entry = dict(stop[i])
+        handlers = list(entry["hooks"])
+        old = handlers[j]
+        if old.get("async") or old.get("commandWindows") is not None or old.get("command_windows") is not None:
+            raise CodexInstallError("Hyperresearch Stop command has an async or Windows override; existing file preserved. Fix it or use --no-stop-hook")
+        handlers[j] = {**old, "command": command}
+        entry["hooks"] = handlers
+        stop[i] = entry
+    else:
+        stop.append({"hooks": [{"type": "command", "command": command}]})
     hooks["Stop"] = stop
     merged["hooks"] = hooks
     return merged
@@ -344,20 +454,27 @@ _ACTIVE_STATUSES = ("running",)
 STOP_GATE_ENV = "HYPERRESEARCH_STOP_GATE"
 
 
-def stop_gate_decision(vault, now: datetime | None = None) -> dict | None:
-    """The Stop hook's block decision for the newest run in `vault`, or None.
+def valid_session_id(value) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) is not None
 
-    Blocks only when the newest run is active, touched within
-    STOP_GATE_WINDOW, and still has a next step.
+
+def stop_gate_decision(vault, now: datetime | None = None, *, session_id: str | None = None) -> dict | None:
+    """The Stop hook's decision for one explicitly session-owned run, or None.
+
+    Missing, unrelated or ambiguous session ownership always permits stopping.
+    Blocks only when the unique owned run is active, recently touched and has
+    a next step. A newer run owned by another session is irrelevant.
     """
     from hyperresearch.core.hooks import step_skill_slug
     from hyperresearch.core.platforms import CODEX, paths_for
     from hyperresearch.core.runs import list_runs, run_resume_position
 
-    runs = list_runs(vault)
-    if not runs:
+    if not valid_session_id(session_id):
         return None
-    manifest = runs[0]
+    owned = [m for m in list_runs(vault) if m.get("codex_session_id") == session_id]
+    if len(owned) != 1:
+        return None
+    manifest = owned[0]
     if manifest.get("status") not in _ACTIVE_STATUSES:
         return None
     try:

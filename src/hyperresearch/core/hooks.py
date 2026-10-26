@@ -66,10 +66,18 @@ def _render_installed(
 
     state = _get_render_state()
     rendered = render_prompt(content, state["context"])
-    rendered = rendered.replace("{hpr_path}", hpr_path.replace("\\", "/"))
+    rendered = rendered.replace("{hpr_path}", _command_path(hpr_path))
     if not header:
         return rendered
     return insert_after_frontmatter(rendered, _provenance_header())
+
+
+def _command_path(hpr_path: str) -> str:
+    if _platform() == "codex":
+        from hyperresearch.core.codex import executable_token
+
+        return executable_token(hpr_path)
+    return hpr_path.replace("\\", "/")
 
 
 def _provenance_header() -> str:
@@ -3648,6 +3656,7 @@ def install_hooks(
     hpr_path: str = "hyperresearch",
     profile: str = "full",
     platform: str = "claude",
+    stop_hook: bool = True,
 ) -> list[str]:
     """Install the hook + skills + subagents for one agent runtime. Returns actions taken.
 
@@ -3673,7 +3682,7 @@ def install_hooks(
     ]
     if platform == CODEX:
         return _run_installers([
-            lambda: _install_codex_stop_hook(vault_root, hpr_path),
+            lambda: _install_codex_stop_hook(vault_root, hpr_path) if stop_hook else None,
             lambda: _install_hyperresearch_skill(vault_root, hpr_path),
             lambda: _install_hyperresearch_step_skills(vault_root, hpr_path),
             *agents,
@@ -3956,41 +3965,53 @@ def _codex_agent_filename(installer) -> str:
     return Path(_AGENT_FILENAMES[installer.__name__]).stem + ".toml"
 
 
-def _install_codex_stop_hook(vault_root: Path, hpr_path: str) -> str | None:
+def _install_codex_stop_hook(vault_root: Path, hpr_path: str, *, check_only: bool = False) -> str | None:
     """Merge the stop-gate Stop hook into the project's .codex/hooks.json.
 
     Per-project only — never ~/.codex. Foreign hooks are preserved; only our
     own entry is replaced. No PreToolUse hook: `codex exec` mishandles
     PreToolUse output, and the vault-check reminder is not worth that risk.
     """
-    from hyperresearch.core.codex import merge_stop_hook
+    from hyperresearch.core.codex import CodexInstallError, merge_stop_hook
 
     hooks_path = vault_root / ".codex" / "hooks.json"
     settings: dict = {}
     if hooks_path.exists():
         # An unreadable hooks.json holds the user's hooks in a form we cannot
         # merge into; overwriting it would destroy them.
+        def unique_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate hook setting")
+                result[key] = value
+            return result
+
         try:
-            loaded = json.loads(hooks_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            loaded = None
+            loaded = json.loads(hooks_path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+            json.dumps(loaded, allow_nan=False)
+        except (ValueError, OSError, RecursionError) as exc:
+            raise CodexInstallError("Cannot read .codex/hooks.json; existing file preserved. Fix it or use --no-stop-hook") from exc
         if not isinstance(loaded, dict):
-            return (
-                "Codex: .codex/hooks.json is not a JSON object — Stop hook NOT "
-                "installed (fix the file, then re-run install)"
-            )
+            raise CodexInstallError(".codex/hooks.json is not a JSON object; existing file preserved. Fix it or use --no-stop-hook")
         settings = loaded
 
-    merged = merge_stop_hook(settings, hpr_path)
-    if merged == settings:
+    try:
+        merged = merge_stop_hook(settings, hpr_path)
+    except RecursionError as exc:
+        raise CodexInstallError(".codex/hooks.json is too deeply nested; existing file preserved") from exc
+    if merged == settings or check_only:
         return None
-    hooks_path.parent.mkdir(parents=True, exist_ok=True)
-    hooks_path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+    try:
+        hooks_path.parent.mkdir(parents=True, exist_ok=True)
+        hooks_path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise CodexInstallError("Cannot write .codex/hooks.json; Stop hook was not installed") from exc
     return "Codex: .codex/hooks.json (Stop hook: run stop-gate)"
 
 
 def _install_researcher_agent(vault_root: Path, hpr_path: str) -> str | None:
-    hpr_posix = hpr_path.replace("\\", "/")
+    hpr_posix = _command_path(hpr_path)
     content = RESEARCHER_AGENT.format(hpr_path=hpr_posix)
     return _write_agent_file(
         vault_root, "hyperresearch-fetcher.md", content, "fetcher (primary-source chasing)"
@@ -3998,7 +4019,7 @@ def _install_researcher_agent(vault_root: Path, hpr_path: str) -> str | None:
 
 
 def _install_loci_analyst_agent(vault_root: Path, hpr_path: str) -> str | None:
-    hpr_posix = hpr_path.replace("\\", "/")
+    hpr_posix = _command_path(hpr_path)
     content = LOCI_ANALYST_AGENT.format(hpr_path=hpr_posix)
     return _write_agent_file(
         vault_root, "hyperresearch-loci-analyst.md", content, "loci analyst"
@@ -4006,7 +4027,7 @@ def _install_loci_analyst_agent(vault_root: Path, hpr_path: str) -> str | None:
 
 
 def _install_source_analyst_agent(vault_root: Path, hpr_path: str) -> str | None:
-    hpr_posix = hpr_path.replace("\\", "/")
+    hpr_posix = _command_path(hpr_path)
     content = SOURCE_ANALYST_AGENT.format(hpr_path=hpr_posix)
     return _write_agent_file(
         vault_root,
@@ -4017,7 +4038,7 @@ def _install_source_analyst_agent(vault_root: Path, hpr_path: str) -> str | None
 
 
 def _install_depth_investigator_agent(vault_root: Path, hpr_path: str) -> str | None:
-    hpr_posix = hpr_path.replace("\\", "/")
+    hpr_posix = _command_path(hpr_path)
     content = DEPTH_INVESTIGATOR_AGENT.format(hpr_path=hpr_posix)
     return _write_agent_file(
         vault_root,
@@ -4028,7 +4049,7 @@ def _install_depth_investigator_agent(vault_root: Path, hpr_path: str) -> str | 
 
 
 def _install_dialectic_critic_agent(vault_root: Path, hpr_path: str) -> str | None:
-    hpr_posix = hpr_path.replace("\\", "/")
+    hpr_posix = _command_path(hpr_path)
     content = DIALECTIC_CRITIC_AGENT.format(hpr_path=hpr_posix)
     return _write_agent_file(
         vault_root,
@@ -4039,7 +4060,7 @@ def _install_dialectic_critic_agent(vault_root: Path, hpr_path: str) -> str | No
 
 
 def _install_depth_critic_agent(vault_root: Path, hpr_path: str) -> str | None:
-    hpr_posix = hpr_path.replace("\\", "/")
+    hpr_posix = _command_path(hpr_path)
     content = DEPTH_CRITIC_AGENT.format(hpr_path=hpr_posix)
     return _write_agent_file(
         vault_root,
@@ -4050,7 +4071,7 @@ def _install_depth_critic_agent(vault_root: Path, hpr_path: str) -> str | None:
 
 
 def _install_width_critic_agent(vault_root: Path, hpr_path: str) -> str | None:
-    hpr_posix = hpr_path.replace("\\", "/")
+    hpr_posix = _command_path(hpr_path)
     content = WIDTH_CRITIC_AGENT.format(hpr_path=hpr_posix)
     return _write_agent_file(
         vault_root,
@@ -4130,7 +4151,7 @@ def _install_readability_reformatter_agent(vault_root: Path, hpr_path: str) -> s
 
 
 def _install_cite_checker_agent(vault_root: Path, hpr_path: str) -> str | None:
-    hpr_posix = hpr_path.replace("\\", "/")
+    hpr_posix = _command_path(hpr_path)
     content = CITE_CHECKER_AGENT.replace("{hpr_path}", hpr_posix)
     return _write_agent_file(
         vault_root,
@@ -4141,7 +4162,7 @@ def _install_cite_checker_agent(vault_root: Path, hpr_path: str) -> str | None:
 
 
 def _install_browser_fetcher_agent(vault_root: Path, hpr_path: str) -> str | None:
-    hpr_posix = hpr_path.replace("\\", "/")
+    hpr_posix = _command_path(hpr_path)
     content = BROWSER_FETCHER_AGENT.replace("{hpr_path}", hpr_posix)
     return _write_agent_file(
         vault_root,
@@ -4152,7 +4173,7 @@ def _install_browser_fetcher_agent(vault_root: Path, hpr_path: str) -> str | Non
 
 
 def _install_corpus_critic_agent(vault_root: Path, hpr_path: str) -> str | None:
-    content = CORPUS_CRITIC_AGENT.replace("{hpr_path}", hpr_path)
+    content = CORPUS_CRITIC_AGENT.replace("{hpr_path}", _command_path(hpr_path))
     return _write_agent_file(
         vault_root,
         "hyperresearch-corpus-critic.md",
@@ -4162,7 +4183,7 @@ def _install_corpus_critic_agent(vault_root: Path, hpr_path: str) -> str | None:
 
 
 def _install_draft_orchestrator_agent(vault_root: Path, hpr_path: str) -> str | None:
-    hpr_posix = hpr_path.replace("\\", "/")
+    hpr_posix = _command_path(hpr_path)
     content = DRAFT_ORCHESTRATOR_AGENT.replace("{hpr_path}", hpr_posix)
     return _write_agent_file(
         vault_root,

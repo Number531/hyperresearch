@@ -133,7 +133,11 @@ What is different on Codex:
 
 - **No browser lane.** Codex has no Claude-in-Chrome equivalent, so fetches blocked by a login wall or bot wall stay in the escalation queue, and the final message lists them for you.
 - **Tool locks are instructions, not enforcement.** Codex custom agents have no per-agent tool allowlist. The patcher and polish auditor are told to make surgical edits only, but nothing stops them from doing more.
-- **A Stop hook guards the pipeline.** `hyperresearch run stop-gate` blocks the session from ending while the newest run is mid-pipeline, so Codex cannot quietly answer inline and stop. Codex runs a project's hooks only after you trust them.
+- **A Stop hook guards an explicitly owned pipeline.** `hyperresearch run stop-gate` blocks only when exactly one run belongs to the hook's `session_id`, is active and recent, and has a next step. New `run init` commands record `codex_session_id` from an unambiguous `CODEX_SESSION_ID` / `CODEX_THREAD_ID` shell environment, or from `--session-id <session-id>`. Conflicting aliases, missing ownership, unrelated sessions and multiple owned runs permit stopping. Existing unowned runs stay unowned; idempotent initialization never transfers an existing owner. Codex runs a project's hooks only after you trust them.
+
+Codex hook commands are shell strings. Hyperresearch quotes the executable for POSIX shells (sh, bash, zsh and compatible shells). Native Windows installation supports only executable paths without spaces or shell metacharacters; other paths fail with `CODEX_INSTALL_ERROR`. Use an installation path supported by the runner. Generated skills, agents and command examples use the same executable encoding.
+
+An invalid or unmergeable `.codex/hooks.json` is preserved and makes installation fail, including `--steps-only`. To deliberately skip stop-enforcement setup, pass `--no-stop-hook`; JSON output reports `stop_hook: "skipped-by-request"`. This opt-out preserves any existing hook file and does not disable a previously installed hook. `HYPERRESEARCH_STOP_GATE=0` disables the gate at runtime. No installation changes existing run ownership.
 
 ---
 

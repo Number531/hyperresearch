@@ -116,6 +116,60 @@ def test_install_steps_only_codex(tmp_vault, monkeypatch):
     assert _json(again)["data"]["steps_installed"] is None
 
 
+@pytest.mark.parametrize("steps_only", [False, True])
+@pytest.mark.parametrize("content", ["{not json", "[]", '{"hooks": []}', '{"hooks": {"Stop": {}}}', '{"hooks": {}, "other": 1}', '{"hooks": {"PreToolUse": {}}}', '{"hooks": {}, "hooks": {}}', '{"hooks": {"FutureEvent": NaN}}'])
+def test_install_rejects_unmergeable_requested_stop_hook(tmp_vault, monkeypatch, steps_only, content):
+    monkeypatch.chdir(tmp_vault.root)
+    hooks = tmp_vault.root / ".codex" / "hooks.json"
+    hooks.parent.mkdir()
+    hooks.write_text(content, encoding="utf-8")
+    args = ["install", str(tmp_vault.root), "--target", "codex", "--json"]
+    if steps_only:
+        args.append("--steps-only")
+    result = runner.invoke(app, args)
+    assert result.exit_code == 1
+    assert _json(result)["ok"] is False
+    assert _json(result)["error_code"] == "CODEX_INSTALL_ERROR"
+    assert hooks.read_text(encoding="utf-8") == content
+
+
+def test_install_explicit_stop_hook_opt_out_is_degraded(tmp_vault, monkeypatch):
+    monkeypatch.chdir(tmp_vault.root)
+    hooks = tmp_vault.root / ".codex" / "hooks.json"
+    hooks.parent.mkdir()
+    hooks.write_text("{not json", encoding="utf-8")
+    result = runner.invoke(app, ["install", str(tmp_vault.root), "--target", "codex", "--no-stop-hook", "--json"])
+    assert result.exit_code == 0, result.stdout
+    assert _json(result)["data"]["stop_hook"] == "skipped-by-request"
+    assert hooks.read_text(encoding="utf-8") == "{not json"
+
+
+@pytest.mark.parametrize("steps_only", [False, True])
+def test_fresh_install_preflight_failure_preserves_entire_target(tmp_path, monkeypatch, steps_only):
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "fresh"
+    hooks = root / ".codex/hooks.json"
+    hooks.parent.mkdir(parents=True)
+    hooks.write_text("{not json", encoding="utf-8")
+
+    def snapshot():
+        return {str(p.relative_to(root)): p.read_bytes() if p.is_file() else None for p in root.rglob("*")}
+
+    before = snapshot()
+    args = ["install", str(root), "--target", "codex", "--json"]
+    if steps_only:
+        args.append("--steps-only")
+    result = runner.invoke(app, args)
+    assert result.exit_code == 1
+    assert _json(result)["error_code"] == "CODEX_INSTALL_ERROR"
+    assert snapshot() == before
+
+    result = runner.invoke(app, [*args, "--no-stop-hook"])
+    assert result.exit_code == 0, result.stdout
+    assert _json(result)["data"]["stop_hook"] == "skipped-by-request"
+    assert hooks.read_text(encoding="utf-8") == "{not json"
+
+
 def test_install_global_codex(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
@@ -155,7 +209,11 @@ def test_profile_use_rerenders_codex_install(tmp_vault, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _gate(stdin: str = "{}", env: dict | None = None):
+def _gate(stdin: str | None = None, env: dict | None = None):
+    if stdin is None:
+        from pathlib import Path
+
+        stdin = json.dumps({"hook_event_name": "Stop", "session_id": "session-a", "stop_hook_active": False, "cwd": str(Path.cwd())})
     return runner.invoke(app, ["run", "stop-gate"], input=stdin, env=env)
 
 
@@ -179,12 +237,12 @@ def running_vault(tmp_vault, monkeypatch):
 
     monkeypatch.chdir(tmp_vault.root)
     monkeypatch.delenv("HYPERRESEARCH_STOP_GATE", raising=False)
-    init_run(tmp_vault, "gate-run")
+    init_run(tmp_vault, "gate-run", session_id="session-a")
     return tmp_vault
 
 
 def test_stop_gate_blocks_in_progress_run(running_vault):
-    result = _gate('{"stop_hook_active": false, "cwd": "."}')
+    result = _gate()
     assert result.exit_code == 0
     decision = json.loads(result.stdout)
     assert decision["decision"] == "block"
@@ -197,11 +255,11 @@ def test_stop_gate_blocks_in_progress_run(running_vault):
 def test_stop_gate_tolerates_bad_stdin(running_vault, stdin):
     result = _gate(stdin)
     assert result.exit_code == 0
-    assert json.loads(result.stdout)["decision"] == "block"
+    assert result.stdout == ""
 
 
 def test_stop_gate_silent_when_stop_hook_active(running_vault):
-    result = _gate('{"stop_hook_active": true}')
+    result = _gate(json.dumps({"hook_event_name": "Stop", "session_id": "session-a", "stop_hook_active": True, "cwd": str(running_vault.root)}))
     assert result.exit_code == 0
     assert result.stdout == ""
 
@@ -225,8 +283,60 @@ def test_stop_gate_follows_cwd_from_hook_input(running_vault, tmp_path, monkeypa
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
-    payload = json.dumps({"cwd": str(running_vault.root)})
+    payload = json.dumps({"hook_event_name": "Stop", "session_id": "session-a", "stop_hook_active": False, "cwd": str(running_vault.root)})
     assert json.loads(_gate(payload).stdout)["decision"] == "block"
+
+
+@pytest.mark.parametrize("field,value", [("session_id", None), ("session_id", "unrelated"), ("session_id", []), ("hook_event_name", "PreToolUse"), ("stop_hook_active", "false"), ("cwd", None), ("cwd", ".")])
+def test_stop_gate_silent_for_missing_unrelated_or_invalid_identity(running_vault, field, value):
+    payload = {"hook_event_name": "Stop", "session_id": "session-a", "stop_hook_active": False, "cwd": str(running_vault.root)}
+    payload[field] = value
+    result = _gate(json.dumps(payload))
+    assert result.exit_code == 0
+    assert result.stdout == ""
+
+
+@pytest.mark.parametrize("aliases,expected", [({"CODEX_SESSION_ID": "session-a"}, "session-a"), ({"CODEX_THREAD_ID": "session-b"}, "session-b"), ({"CODEX_SESSION_ID": "session-a", "CODEX_THREAD_ID": "session-a"}, "session-a"), ({"CODEX_SESSION_ID": "session-a", "CODEX_THREAD_ID": "session-b"}, None), ({}, None)])
+def test_run_init_binds_only_unambiguous_codex_identity(tmp_vault, monkeypatch, aliases, expected):
+    monkeypatch.chdir(tmp_vault.root)
+    for key in ("CODEX_SESSION_ID", "CODEX_THREAD_ID"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in aliases.items():
+        monkeypatch.setenv(key, value)
+    result = runner.invoke(app, ["run", "init", "bound-run", "--json"])
+    assert result.exit_code == 0, result.stdout
+    assert _json(result)["data"]["manifest"].get("codex_session_id") == expected
+
+
+def test_run_init_explicit_owner_and_conflicting_rebind(tmp_vault, monkeypatch):
+    monkeypatch.chdir(tmp_vault.root)
+    first = runner.invoke(app, ["run", "init", "bound-run", "--session-id", "session-a", "--json"])
+    assert first.exit_code == 0
+    second = runner.invoke(app, ["run", "init", "bound-run", "--session-id", "session-b", "--json"])
+    assert second.exit_code == 1
+    assert _json(second)["error_code"] == "RUN_ERROR"
+
+
+def test_stop_gate_two_sessions_two_runs_and_unrelated_session(tmp_vault, monkeypatch):
+    monkeypatch.chdir(tmp_vault.root)
+    for session in ("session-a", "session-b"):
+        result = runner.invoke(app, ["run", "init", session + "-run", "--session-id", session, "--json"])
+        assert result.exit_code == 0
+    for session in ("session-a", "session-b", "unrelated"):
+        payload = {"hook_event_name": "Stop", "session_id": session, "stop_hook_active": False, "cwd": str(tmp_vault.root)}
+        result = _gate(json.dumps(payload))
+        assert result.exit_code == 0
+        if session == "unrelated":
+            assert result.stdout == ""
+        else:
+            assert session + "-run is at step" in json.loads(result.stdout)["reason"]
+
+
+def test_stop_gate_does_not_infer_missing_payload_owner_from_environment(running_vault):
+    payload = {"hook_event_name": "Stop", "stop_hook_active": False, "cwd": str(running_vault.root)}
+    result = _gate(json.dumps(payload), env={"CODEX_SESSION_ID": "session-a", "CODEX_THREAD_ID": "session-a"})
+    assert result.exit_code == 0
+    assert result.stdout == ""
 
 
 def test_stop_gate_hidden_from_help():

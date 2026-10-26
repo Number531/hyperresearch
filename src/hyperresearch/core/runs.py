@@ -91,18 +91,27 @@ def init_run(
     profile: str = "full",
     budget_usd: float | None = None,
     query: str | None = None,
+    session_id: str | None = None,
 ) -> dict:
     """Scaffold research/runs/<vault_tag>/ and write a fresh manifest.
 
     Idempotent: re-running on an existing run returns the existing manifest
     unchanged (so a recovering orchestrator can call it safely).
     """
+    from hyperresearch.core.codex import valid_session_id
     from hyperresearch.core.profiles import resolve_profile
+
+    if session_id is not None and not valid_session_id(session_id):
+        raise RunError("invalid Codex session id")
 
     run_dir = vault.run_dir(vault_tag)
     mpath = run_dir / MANIFEST_NAME
     if mpath.exists():
-        return load_manifest(vault, vault_tag)
+        existing = load_manifest(vault, vault_tag)
+        owner = existing.get("codex_session_id")
+        if session_id is not None and owner is not None and owner != session_id:
+            raise RunError("run belongs to another Codex session; existing owner preserved")
+        return existing
 
     resolved = resolve_profile(profile, vault.config_path)
 
@@ -131,6 +140,8 @@ def init_run(
             "agents_spawned": 0,
         },
     }
+    if session_id is not None:
+        manifest["codex_session_id"] = session_id
     _save(vault, vault_tag, manifest)
     return manifest
 
