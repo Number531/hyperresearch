@@ -221,11 +221,21 @@ Product source is identical to the reviewed8ca38f2 correction; later commits
 added independent controls/evidence only. Main and origin/main remain at the
 initialf8ccd081 base. The task branch is clean, with no history rewrite.
 
-## Plan outcome (submitted for final independent verification)
+## Plan outcome
 
 - Original objective: Implement the approved P0, P1 and P2 Hyperresearch semantic-verification hardening sequentially in a fresh workspace with offline tests and independent review, preserving historical results and existing worktrees.
-- Proposed result: Achieved, subject to final independent verification.
+- Result: Achieved for the approved scoped local implementation, confirmed by final independent verification.
 - Acceptance: P0-AC-1, P1-AC-1 and P2-AC-1 satisfied;3/3. All phase checks and audits accepted, no open critical/major finding. The explicit aggregate no-new-failure criterion is satisfied with the two unchanged offline DNS failures disclosed.
 - Material deviations: current fresh base already contained upstream PR2–4, so overlapping gates were preserved rather than reimplemented. Producer step1 and bounded P1-Q-LONG remediation mapped to the approved seams. The initial readiness-wrapper sequencing issue is disclosed above. No acceptance signal or preservation boundary was weakened.
 - Deferred/unverified: real provider/model/research quality, reviewer truth and independent execution, semantic atomization/classification, and large real-vault performance were not tested. Recorded judgments remain distinct from automatic truth certification. No historical research replay, global installation, remote push/PR/merge or default-branch sync was performed or inferred.
 - Rollback/handoff: ordinary reviewed correction/revert on this task branch only; no reset/clean/force. This local branch is the deliverable. Remote publication/integration needs separate action-scoped authority.
+
+Final verifier `semantic_final_acceptance_verifier` inspected clean checkpoint
+`665057d81dde81e490bfb3fed3e2b0411974b1c7`, the canonical plan, complete final
+diff and evidence, phase/probe receipts and both aggregate logs. Verdict: pass
+for all3 acceptance criteria; zero critical/major/minor verification findings.
+It independently confirmed unchanged DNS failure IDs/fingerprint and the
+declared no-new-failure criterion. Preservation/no-live/global/remote claims
+are supported by execution evidence and changed-path inspection, not forensic
+inspection of historical vaults or external state. This final evidence-only
+checkpoint changes no product source, tests or previously validated outcome.
