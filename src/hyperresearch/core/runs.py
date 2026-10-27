@@ -663,26 +663,46 @@ def verify_run(vault, vault_tag: str) -> dict:
         check("artifact:polish-log.json", (run_dir / "polish-log.json").exists(),
               str(run_dir / "polish-log.json"))
 
-    # Cite-check (step 14.5): findings must exist and critical ones resolved
+    # Cite-check (step 14.5): explicit schema, original pair identity, and
+    # reviewed critical resolution. Stage dependencies/final audit are separate.
     cc_findings = run_dir / "cite-check-findings.json"
     if manifest.get("steps", {}).get("14.5", {}).get("status") == "done":
-        ok = cc_findings.exists()
-        detail = str(cc_findings)
-        if ok:
-            try:
-                findings = json.loads(cc_findings.read_text(encoding="utf-8-sig"))
-                # The cite-check step writes {"findings": [...]}; older runs
-                # (and the original design sketch) used a bare list. Accept both.
-                if isinstance(findings, dict):
-                    findings = findings.get("findings", [])
-                criticals = [f for f in findings if f.get("severity") == "critical"]
-                if criticals:
-                    log_path = run_dir / "cite-check-patch-log.json"
-                    ok = log_path.exists()
-                    detail = f"{len(criticals)} critical finding(s); patch log {'present' if ok else 'MISSING'}"
-            except json.JSONDecodeError:
-                ok = False
-                detail = "cite-check-findings.json is not valid JSON"
+        from hyperresearch.core.citation_contracts import (
+            CitationContractError,
+            bind_findings,
+            parse_findings,
+            parse_pairs,
+            report_revision,
+            validate_resolutions,
+        )
+
+        try:
+            findings = parse_findings(json.loads(cc_findings.read_text(encoding="utf-8-sig")))
+            if findings.legacy:
+                # Read-only compatibility, never an invented identity or a
+                # migration of historical artifacts. Zero is explicit, but
+                # does not prove selected coverage or final-current-byte review.
+                ok = not findings.findings
+                detail = (
+                    "legacy explicit zero findings; diagnostic only, review coverage unverified"
+                    if ok else "legacy findings lack verified revision/identity; resolution unverified"
+                )
+            else:
+                pairs_path = run_dir / "cite-check-pairs.json"
+                pairs = parse_pairs(json.loads(pairs_path.read_text(encoding="utf-8-sig")))
+                bind_findings(findings, pairs)
+                criticals = [f for f in findings.findings if f["severity"] == "critical"]
+                log_path = run_dir / "cite-check-patch-log.json"
+                if criticals or log_path.exists():
+                    validate_resolutions(
+                        findings, json.loads(log_path.read_text(encoding="utf-8-sig")),
+                        report_revision(report_path.read_bytes()),
+                    )
+                ok = True
+                detail = f"valid v1 findings; {len(criticals)} critical finding(s) reviewed and resolved"
+        except (CitationContractError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+            ok = False
+            detail = f"citation artifacts invalid/unverified: {exc}"
         check("cite-check-resolved", ok, detail)
 
     return {"vault_tag": vault_tag, "passed": all(c["ok"] for c in checks), "checks": checks}

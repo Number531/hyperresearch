@@ -24,6 +24,12 @@ from __future__ import annotations
 import json
 import re
 
+from hyperresearch.core.citation_contracts import (
+    CONTRACT_VERSION,
+    finding_id,
+    pair_id,
+    report_revision,
+)
 from hyperresearch.core.patterns import WIKI_LINK_RE
 
 # Sentence split: period/question/exclamation followed by space+capital, or newline.
@@ -75,12 +81,13 @@ def parse_sources_section(report_text: str, conn) -> dict[str, str | None]:
     return mapping
 
 
-def extract_pairs(report_text: str, conn) -> list[dict]:
+def extract_pairs(report_text: str, conn, *, revision: str | None = None) -> list[dict]:
     """All (sentence, note_id) citation bindings in the report.
 
     Pairs whose citation can't be resolved to a vault note get
     note_id=None — those are findings in themselves (dangling citation).
     """
+    revision = revision or report_revision(report_text.encode("utf-8"))
     numbered_map = parse_sources_section(report_text, conn)
     known_ids = {row["id"] for row in conn.execute("SELECT id FROM notes")}
 
@@ -98,7 +105,12 @@ def extract_pairs(report_text: str, conn) -> list[dict]:
             target = m.group(1).strip()
             cited.append(target if target in known_ids else None)
         for note_id in cited:
+            index = len(pairs)
+            identity = pair_id(revision, index, sentence, note_id)
             pairs.append({
+                "pair_index": index,
+                "pair_id": identity,
+                "finding_id": finding_id(identity),
                 "sentence": sentence,
                 "note_id": note_id,
                 "numbers": _NUMBER_RE.findall(sentence),
@@ -198,15 +210,20 @@ def sample_needs_llm(pairs: list[dict], sample_rate: float = 0.6) -> list[dict]:
 
 def write_pairs_file(vault, vault_tag: str, report_path, sample_rate: float = 0.6) -> dict:
     """Extract + triage + sample; write cite-check-pairs.json into the run dir."""
-    report_text = report_path.read_text(encoding="utf-8-sig")
-    pairs = extract_pairs(report_text, vault.db)
+    report_bytes = report_path.read_bytes()
+    revision = report_revision(report_bytes)
+    report_text = report_bytes.decode("utf-8-sig")
+    pairs = extract_pairs(report_text, vault.db, revision=revision)
     triaged = triage_pairs(pairs, vault.db)
     to_check = sample_needs_llm(triaged["pairs"], sample_rate)
 
     run_dir = vault.run_dir(vault_tag)
     run_dir.mkdir(parents=True, exist_ok=True)
     out = {
+        "schema_version": CONTRACT_VERSION,
+        "report_revision": revision,
         "report": str(report_path),
+        "pairs": triaged["pairs"],
         "summary": {k: v for k, v in triaged.items() if k != "pairs"},
         "sampled_for_llm": to_check,
         "dangling": [p for p in triaged["pairs"] if p["verdict"] == "dangling"],

@@ -298,7 +298,26 @@ def test_install_patcher_agent_is_edit_only(tmp_vault):
     assert "location" in body
     assert "recommendation" in body
     assert "requires_orchestrator_restructure" in body
+    assert "finding_id" in body
+    assert "Applying a patch is not reviewed resolution" in body
+    assert "leave `resolutions`" in body
     assert result is not None
+
+
+def test_cite_checker_installs_versioned_findings_and_postpatch_review(tmp_vault):
+    from hyperresearch.core.hooks import _install_cite_checker_agent
+
+    _install_cite_checker_agent(tmp_vault.root, "hyperresearch")
+    body = (tmp_vault.root / ".claude" / "agents" / "hyperresearch-cite-checker.md").read_text(
+        encoding="utf-8"
+    )
+    for field in ("schema_version", "report_revision", "pair_id", "finding_id", "resolutions"):
+        assert field in body
+    assert "Resolution-review mode" in body
+    assert "findings_report_revision" in body
+    assert "reviewed_report_revision" in body
+    assert "hash the exact current report bytes" in body
+    assert "Never edit the report during this review" in body
 
 
 def test_install_polish_auditor_agent_is_edit_only(tmp_vault):
