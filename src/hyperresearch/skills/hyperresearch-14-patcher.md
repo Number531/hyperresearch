@@ -60,6 +60,8 @@ echo '{"total_findings": 0, "applied": [], "skipped": [], "conflicts": [], "orch
 
 The schema above is canonical. The patcher's only job on this file is to <% if platform == "codex" %>patch<% else %>Edit<% endif %> the existing keys — `total_findings` becomes an integer, the four arrays get populated. **The patcher MUST NOT invent alternate schemas** — downstream tooling assumes the canonical shape.
 
+The later step-14.5 citation pass uses its own versioned `cite-check-patch-log.json` stub, documented in that step. For that pass consume the findings envelope's `findings` array, preserve `finding_id` / `pair_id`, and include `finding_id` in application entries. Preserve its version/revision fields and leave `resolutions` to the later cite-checker review. A patcher's `applied`, `skipped`, or `orchestrator_escalated` entry is an application record; it cannot establish reviewed citation resolution.
+
 If you skip this step the patcher will silently have nowhere to write its log, will inline the log in its response instead, and you may mis-capture or drop the data entirely.
 
 ---

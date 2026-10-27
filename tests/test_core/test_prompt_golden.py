@@ -8,6 +8,9 @@ or template deliberately requires updating the golden, which makes prompt
 changes reviewable instead of silent.
 
 Deliberate deviations already folded into the goldens (2026-07-19):
+  - Citation identity contract (2026-10-27): the cite-checker emits version-1
+    findings with original report/pair identity and explicitly rereads patched
+    claims in resolution-review mode before recording critical resolution.
   - Untrusted-source policy (2026-07-20): RESEARCHER_AGENT and
     DEPTH_INVESTIGATOR_AGENT gained the "Untrusted content policy" block
     (fetched note bodies arrive fenced in <untrusted-source> delimiters and

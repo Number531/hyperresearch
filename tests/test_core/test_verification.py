@@ -45,6 +45,22 @@ class TestCiteCheckExtraction:
         assert pairs[0]["note_id"] == "python-async-patterns"
         assert pairs[0]["numbers"] == ["10"] or "10x" in pairs[0]["sentence"]
 
+    def test_pairs_file_binds_exact_report_bytes_and_repeated_occurrences(self, cited_vault):
+        from hyperresearch.core.citation_contracts import parse_pairs, report_revision
+        from hyperresearch.core.citecheck import write_pairs_file
+
+        report = cited_vault.notes_dir / "final_report_bytes.md"
+        raw = b"\xef\xbb\xbfEvidence [[python-async-patterns]].\r\nEvidence [[python-async-patterns]].\r\n"
+        report.write_bytes(raw)
+        out = write_pairs_file(cited_vault, "bytes-contract", report)
+        parsed = parse_pairs(out)
+        assert parsed.report_revision == report_revision(raw)
+        assert len(parsed.pairs) == 2
+        assert parsed.pairs[0]["pair_id"] != parsed.pairs[1]["pair_id"]
+        assert [p["pair_index"] for p in parsed.pairs] == [0, 1]
+        persisted = json.loads((cited_vault.run_dir("bytes-contract") / "cite-check-pairs.json").read_text())
+        assert persisted == out
+
     def test_numbered_pairs_resolve_via_sources_section(self, cited_vault):
         report = (
             "Throughput improves 10x [1].\n\n"
@@ -799,9 +815,7 @@ class TestFinishGate:
         assert "retracted-citations" in names
 
     def test_cite_check_findings_accepts_both_shapes(self, tmp_vault):
-        """The pipeline writes {"findings": [...]}; verify must not crash on
-        it (it did, on the first live gate run) and must still resolve
-        criticals for the bare-list shape."""
+        """Legacy shapes remain readable, but log presence proves no resolution."""
         from hyperresearch.core.runs import set_step
 
         for tag, payload in (
@@ -821,7 +835,134 @@ class TestFinishGate:
             (run_dir / "cite-check-patch-log.json").write_text("[]", encoding="utf-8")
             result = verify_run(tmp_vault, tag)
             by_name = {c["name"]: c for c in result["checks"]}
-            assert by_name["cite-check-resolved"]["ok"] is True
+            # A log's presence cannot prove that a legacy critical was reviewed.
+            assert by_name["cite-check-resolved"]["ok"] is False
+
+    @pytest.mark.parametrize("payload", [{}, {"findings": None}, {"findings": {}}, 1, [1]])
+    def test_cite_check_rejects_malformed_payload_cleanly(self, tmp_vault, payload):
+        tag = "malformed-citations"
+        self._well_formed_light_run(tmp_vault, tag)
+        set_step(tmp_vault, tag, "14.5", "done")
+        (tmp_vault.run_dir(tag) / "cite-check-findings.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        by_name = {c["name"]: c for c in verify_run(tmp_vault, tag)["checks"]}
+        assert by_name["cite-check-resolved"]["ok"] is False
+
+    @pytest.mark.parametrize("payload", [[], {"findings": []}])
+    def test_cite_check_legacy_empty_is_diagnostic_without_rewriting(self, tmp_vault, payload):
+        tag = "legacy-zero"
+        self._well_formed_light_run(tmp_vault, tag)
+        set_step(tmp_vault, tag, "14.5", "done")
+        path = tmp_vault.run_dir(tag) / "cite-check-findings.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        before = path.read_bytes()
+        by_name = {c["name"]: c for c in verify_run(tmp_vault, tag)["checks"]}
+        assert by_name["cite-check-resolved"]["ok"] is True
+        assert "diagnostic" in by_name["cite-check-resolved"]["detail"]
+        assert path.read_bytes() == before
+
+    def test_cite_check_binds_original_findings_and_reviewed_patched_bytes(self, tmp_vault):
+        from hyperresearch.core.citation_contracts import report_revision
+        from hyperresearch.core.citecheck import write_pairs_file
+
+        tag = "reviewed-critical"
+        report = self._well_formed_light_run(tmp_vault, tag)
+        run_dir = tmp_vault.run_dir(tag)
+        pairs = write_pairs_file(tmp_vault, tag, report)
+        pair = pairs["pairs"][0]
+        findings = {
+            "schema_version": 1, "report_revision": pairs["report_revision"],
+            "findings": [{
+                "pair_id": pair["pair_id"], "finding_id": pair["finding_id"],
+                "sentence": pair["sentence"], "cited_note_id": pair["note_id"],
+                "correct_note_id": None, "severity": "critical", "verdict": "dangling",
+                "evidence": "The citation does not resolve.", "suggested_fix": "Remove the claim.",
+            }],
+        }
+        (run_dir / "cite-check-findings.json").write_text(json.dumps(findings), encoding="utf-8")
+        set_step(tmp_vault, tag, "14.5", "done")
+
+        def citation_check():
+            return next(c for c in verify_run(tmp_vault, tag)["checks"] if c["name"] == "cite-check-resolved")
+
+        assert citation_check()["ok"] is False  # missing review
+        report.write_bytes(report.read_bytes() + b"\nPatched report.\n")
+        log = {
+            "schema_version": 1, "findings_report_revision": findings["report_revision"],
+            "reviewed_report_revision": report_revision(report.read_bytes()),
+            "applied": [{"finding_id": pair["finding_id"]}],
+            "resolutions": [{
+                "finding_id": pair["finding_id"], "status": "resolved",
+                "review_verdict": "supported", "evidence": "Reread report and the corrected source.",
+            }],
+        }
+        (run_dir / "cite-check-patch-log.json").write_text(json.dumps(log), encoding="utf-8")
+        assert citation_check()["ok"] is True
+        # Even a newline change invalidates a recorded post-patch review.
+        report.write_bytes(report.read_bytes() + b"\n")
+        assert citation_check()["ok"] is False
+        assert "stale" in citation_check()["detail"]
+        # A fresh recorded rereview can bind later polished bytes while the
+        # original finding identity/revision remains intact.
+        original_revision = log["findings_report_revision"]
+        log["reviewed_report_revision"] = report_revision(report.read_bytes())
+        log["resolutions"][0]["evidence"] = "Reread current polished report and corrected source again."
+        (run_dir / "cite-check-patch-log.json").write_text(json.dumps(log), encoding="utf-8")
+        assert citation_check()["ok"] is True
+        assert log["findings_report_revision"] == original_revision
+
+    @pytest.mark.parametrize("contents", [b"{", b"\xff"])
+    def test_cite_check_invalid_json_or_encoding_fails_cleanly(self, tmp_vault, contents):
+        tag = "unreadable-citations"
+        self._well_formed_light_run(tmp_vault, tag)
+        set_step(tmp_vault, tag, "14.5", "done")
+        (tmp_vault.run_dir(tag) / "cite-check-findings.json").write_bytes(contents)
+        by_name = {c["name"]: c for c in verify_run(tmp_vault, tag)["checks"]}
+        assert by_name["cite-check-resolved"]["ok"] is False
+
+    def test_cite_check_major_only_application_log_needs_no_resolution_review(self, cited_vault):
+        from hyperresearch.core.citecheck import write_pairs_file
+
+        tag = "major-only"
+        body = "## Findings\n\n" + (
+            "Sources provide limited evidence about the current claim [[python-async-patterns]]. " * 80
+        )
+        report = self._well_formed_light_run(cited_vault, tag, body)
+        run_dir = cited_vault.run_dir(tag)
+        pairs = write_pairs_file(cited_vault, tag, report)
+        pair = pairs["pairs"][0]
+        findings = {
+            "schema_version": 1, "report_revision": pairs["report_revision"],
+            "findings": [{
+                "pair_id": pair["pair_id"], "finding_id": pair["finding_id"],
+                "sentence": pair["sentence"], "cited_note_id": pair["note_id"],
+                "correct_note_id": None, "severity": "major", "verdict": "partially-supported",
+                "evidence": "The source supports only the narrower claim.", "suggested_fix": "Narrow the claim.",
+            }],
+        }
+        (run_dir / "cite-check-findings.json").write_text(json.dumps(findings), encoding="utf-8")
+        log = {
+            "schema_version": 1, "findings_report_revision": pairs["report_revision"],
+            "reviewed_report_revision": None, "resolutions": [], "total_findings": 1,
+            "applied": [{"finding_id": pair["finding_id"]}], "skipped": [],
+            "conflicts": [], "orchestrator_escalated": [],
+        }
+        (run_dir / "cite-check-patch-log.json").write_text(json.dumps(log), encoding="utf-8")
+        set_step(cited_vault, tag, "14.5", "done")
+        by_name = {c["name"]: c for c in verify_run(cited_vault, tag)["checks"]}
+        assert by_name["cite-check-resolved"]["ok"] is True, by_name["cite-check-resolved"]
+        # Claiming a review makes even optional noncritical records strict.
+        from hyperresearch.core.citation_contracts import report_revision
+
+        log["reviewed_report_revision"] = report_revision(report.read_bytes())
+        log["resolutions"] = [{
+            "finding_id": "finding-v1:" + "0" * 64, "status": "resolved",
+            "review_verdict": "supported", "evidence": "Unrelated review.",
+        }]
+        (run_dir / "cite-check-patch-log.json").write_text(json.dumps(log), encoding="utf-8")
+        by_name = {c["name"]: c for c in verify_run(cited_vault, tag)["checks"]}
+        assert by_name["cite-check-resolved"]["ok"] is False
 
 
 class TestCiteCheckerAgentInstall:

@@ -31,10 +31,14 @@ small patcher pass — you do NOT edit the report yourself.
   `sampled_for_llm` array; your spawn prompt names which index range is yours)
 - findings_path: research/runs/<vault_tag>/cite-check-findings.json
 - vault_tag
+- mode: `findings` (default), or `resolution-review` after the patcher
+- In `resolution-review` mode only: draft_path, findings_input_path, and
+  patch_log_path (the existing cite-check-patch-log.json)
 
 ## Procedure
 
-For each assigned pair:
+For `findings` mode, read the pairs file's `schema_version` and
+`report_revision`. For each assigned pair:
 
 1. Read the cited note's body:
    ```bash
@@ -56,27 +60,61 @@ For each assigned pair:
    Judge the SOURCE-SENTENCE binding only. Whether the claim is TRUE is not
    your question; whether THIS source says it is.
 
-3. Only non-`supported` verdicts become findings. Write ALL your findings in
-   ONE JSON array to your assigned findings path:
+3. Only non-`supported` verdicts become findings. Copy the pair's exact
+   `pair_id`, `finding_id`, `sentence`, and `note_id` (as `cited_note_id`);
+   never invent or renumber identities. Write ONE versioned envelope to
+   your assigned findings path:
    ```json
-   [
-     {
-       "verdict": "unsupported | partially-supported | wrong-source",
-       "severity": "critical | major",
-       "sentence": "<verbatim from the pairs file>",
-       "cited_note_id": "<id>",
-       "correct_note_id": "<id or null>",
-       "evidence": "<one sentence: what the note actually says / lacks>",
-       "suggested_fix": "<swap citation | soften claim to what the source supports | delete sentence>"
-     }
-   ]
+   {
+     "schema_version": 1,
+     "report_revision": "<copy from pairs file>",
+     "findings": [
+       {
+         "finding_id": "<copy from pair>",
+         "pair_id": "<copy from pair>",
+         "verdict": "unsupported | partially-supported | wrong-source",
+         "severity": "critical | major",
+         "sentence": "<verbatim from the pairs file>",
+         "cited_note_id": "<id or null>",
+         "correct_note_id": null,
+         "evidence": "<what the note actually says / lacks>",
+         "suggested_fix": "<swap citation | soften claim | delete sentence>"
+       }
+     ]
+   }
    ```
+   Replace `correct_note_id` with the actual note id for a wrong-source fix.
    Severity: `critical` for unsupported number-bearing claims and
-   wrong-source; `major` otherwise. Write `[]` if every pair checked out.
+   wrong-source; `major` otherwise. If every pair checked out, write the
+   same envelope with `findings: []`, never a missing field or bare `{}`.
+
+## Resolution-review mode (after patch application)
+
+Read the original findings and the CURRENT patched report. Reread the
+relevant cited note bodies for every critical finding. Judge the actual
+remaining claim and citation, not the patcher's `applied` entry. A changed
+claim must now be supported; a removed claim must actually be absent.
+If the finding remains unresolved, record that and report a blocker.
+
+Preserve the existing patch log's application data. Populate its
+`schema_version: 1`, `findings_report_revision` (copy the original findings
+revision), `reviewed_report_revision` (hash the exact current report bytes),
+and `resolutions`. Hash bytes using Python's hashlib, with no normalization:
+`'sha256:' + hashlib.sha256(Path(draft_path).read_bytes()).hexdigest()`.
+The shared native API is `hyperresearch.core.citation_contracts.report_revision`.
+The original findings revision can differ from this post-patch revision.
+
+Write exactly one resolution record per reviewed finding and cover every
+critical. Each record has `finding_id`, `status` (`resolved` or `unresolved`),
+`review_verdict` (`supported`, `claim-removed`, or `unresolved`), and a
+nonempty `evidence` explanation of the reread report/source. Only the first
+two review verdicts permit `status: resolved`. Unknown/duplicate identities,
+stale revisions, skipped/escalated patches, and application alone cannot
+clear the gate. Never edit the report during this review.
 
 ## Rules
 
 - Verdicts default SKEPTICAL: when you cannot find support in the note,
   the verdict is unsupported — never "probably fine".
-- Do not re-litigate pairs the triage auto-passed.
+- In findings mode, do not re-litigate pairs the triage auto-passed.
 - Your final message: counts per verdict + the findings path. Data, not prose.
