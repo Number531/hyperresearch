@@ -571,6 +571,20 @@ def test_shards_preserve_supported_results_ids_and_evidence(coverage_artifacts):
         merge_findings_shards(pairs, shards[:-1], vault)
 
 
+def test_shard_merge_preserves_one_complete_semantic_review_owner(coverage_artifacts):
+    vault, pairs, findings = coverage_artifacts
+    first, second = copy.deepcopy(findings), copy.deepcopy(findings)
+    first["selected_pair_ids"], first["results"] = findings["selected_pair_ids"][:1], findings["results"][:1]
+    second["selected_pair_ids"], second["results"] = findings["selected_pair_ids"][1:], findings["results"][1:]
+    first["semantic_review"] = {"schema_version": 1, "reviewer": {"identity": "designated-whole-report-owner"},
+                                "units": [{"unit_id": "preserve-this-exact-review"}]}
+    merged = merge_findings_shards(pairs, [first, second], vault)
+    assert merged["semantic_review"] == first["semantic_review"]
+    second["semantic_review"] = copy.deepcopy(first["semantic_review"])
+    with pytest.raises(CitationContractError, match="exactly one"):
+        merge_findings_shards(pairs, [first, second], vault)
+
+
 @pytest.mark.parametrize("title,body", [
     ("Original Introduction", "This introduction defines asynchronous I/O as concurrent input and output."),
     ("Vendor Product", "Our widget imports one CSV file at a time."),

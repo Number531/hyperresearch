@@ -1069,7 +1069,7 @@ def finalization_inputs(vault, vault_tag: str) -> dict:
 
 def _verification_inputs(vault, manifest: dict) -> dict:
     """Stable inputs only: exclude status, heartbeat, spend, and the receipt itself."""
-    from hyperresearch.cli.lint import _check_quote_integrity, _check_retracted_citations
+    from hyperresearch.cli.lint import _check_cited_quote_integrity, _check_retracted_citations
     from hyperresearch.core.citation_contracts import source_input
     from hyperresearch.core.citecheck import extract_pairs
     from hyperresearch.core.profiles import resolve_profile
@@ -1077,12 +1077,13 @@ def _verification_inputs(vault, manifest: dict) -> dict:
     run_dir = vault.run_dir(manifest["vault_tag"])
     report = _report_path(vault, manifest["vault_tag"])
     raw = report.read_bytes() if report.exists() else b""
-    pairs = extract_pairs(raw.decode("utf-8-sig"), vault.db)
-    sources = {pair["note_id"]: source_input(vault, pair["note_id"])[0] for pair in pairs if pair["note_id"] is not None}
+    pairs = extract_pairs(raw.decode("utf-8-sig"), vault.db, whole_report=True)
+    source_cache = {}
+    sources = {pair["note_id"]: source_input(vault, pair["note_id"], source_cache)[0] for pair in pairs if pair["note_id"] is not None}
     names = set(_output_specs(vault, manifest)) | {"final-cite-check-pairs.json", "final-cite-check-findings.json", "final-cite-check-patch-log.json"}
     text = raw.decode("utf-8-sig")
     lint_outcomes = {
-        "quote-integrity": _check_quote_integrity(vault, vault.db, report, text),
+        "quote-integrity": _check_cited_quote_integrity(vault, vault.db, report, text, pairs=pairs, source_cache=source_cache),
         "retracted-citations": _check_retracted_citations(vault, vault.db, report, text),
     }
     return {"finalization_version": manifest.get("finalization_version"), "vault_tag": manifest["vault_tag"],
@@ -1109,6 +1110,7 @@ def approval_current(vault, manifest: dict) -> bool:
 def _validate_final_audit(vault, manifest: dict) -> dict:
     from hyperresearch.core.citation_contracts import parse_findings, validate_coverage
     from hyperresearch.core.citecheck import extract_pairs
+    from hyperresearch.core.semantic_review import validate_review
 
     run_dir = vault.run_dir(manifest["vault_tag"])
     inputs = finalization_inputs(vault, manifest["vault_tag"])
@@ -1119,17 +1121,22 @@ def _validate_final_audit(vault, manifest: dict) -> dict:
     report = _report_path(vault, manifest["vault_tag"])
     if pairs.get("report_revision") != inputs["report_revision"]:
         raise RunError("final citation report revision is stale")
-    actual = extract_pairs(report.read_bytes().decode("utf-8-sig"), vault.db, revision=inputs["report_revision"])
-    keys = ("pair_index", "pair_id", "finding_id", "sentence", "note_id", "citation", "numbers", "strong")
+    text = report.read_bytes().decode("utf-8-sig")
+    actual = extract_pairs(text, vault.db, revision=inputs["report_revision"], whole_report=True)
+    keys = ("pair_index", "pair_id", "finding_id", "sentence", "note_id", "citation", "numbers", "strong", "report_span")
     def projection(records):
         if any(not isinstance(pair, dict) for pair in records):
             raise RunError("final pairs must be objects")
         return [{key: pair.get(key) for key in keys} for pair in records]
     if not isinstance(pairs.get("pairs"), list) or projection(pairs["pairs"]) != projection(actual):
         raise RunError("final pairs differ from actual report extraction; citation occurrences were dropped or changed")
-    coverage = validate_coverage(pairs, findings, vault)
+    if pairs.get("coverage_mode") != "comprehensive" or pairs.get("unreviewed_pair_ids") != []:
+        raise RunError("final acceptance requires comprehensive citation coverage; sampled final is diagnostic only")
+    source_cache = {}
+    coverage = validate_coverage(pairs, findings, vault, source_cache=source_cache)
     if any(item["severity"] in {"critical", "major"} for item in parse_findings(findings).findings):
         raise RunError("current final critical/major findings require correction and fresh extraction/results; a resolution log cannot clear them")
+    coverage.update(validate_review(text, inputs["report_revision"], pairs, findings.get("semantic_review"), source_cache))
     return coverage
 
 
@@ -1285,12 +1292,12 @@ def verify_run(vault, vault_tag: str) -> dict:
             # folding the rules in here removes that seam.
             try:
                 from hyperresearch.cli.lint import (
-                    _check_quote_integrity,
+                    _check_cited_quote_integrity,
                     _check_retracted_citations,
                 )
 
                 for rule, fn in (
-                    ("quote-integrity", _check_quote_integrity),
+                    ("quote-integrity", _check_cited_quote_integrity),
                     ("retracted-citations", _check_retracted_citations),
                 ):
                     errors = [

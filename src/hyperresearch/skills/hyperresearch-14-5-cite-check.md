@@ -142,19 +142,44 @@ Return to the entry skill and invoke `<% if platform == "codex" %>cat .hyperrese
 This is the existing citation procedure with separate final-pass paths, not an
 additional initial review group for light. Mark all required stages done with
 real outputs; step 16's completion must match the exact current report bytes.
-Run `{hpr_path} citecheck extract <vault_tag> --final -j`. Preserve the declared
-sampling mode/remainder. The extraction binds the stable stage/output inputs,
-including initial evidence hashes, and every actual report citation occurrence.
+Run `{hpr_path} citecheck extract <vault_tag> --final -j`. Final extraction
+defaults to comprehensive coverage: review every citation pair with zero
+unreviewed remainder. Explicit `--coverage-mode sampled` is diagnostic only
+and cannot approve finish, even if its selected results are all supported.
+The extraction binds stable stage/output inputs, including initial evidence
+hashes, every actual citation occurrence and the complete `semantic_inventory`.
+It inventories every nonblank report unit with exact spans and block/heading
+context, including uncited prose, tables, lists, quotations and content after
+Sources/References. A heading cannot hide an assertion from review.
 
 Repeat extraction and findings-mode checker work above using:
 - `pairs_file: research/runs/<vault_tag>/final-cite-check-pairs.json`
 - `findings_path: research/runs/<vault_tag>/final-cite-check-findings.json`
 - `audit_pass: final`, `mode: findings`
 
-For parallel checkers use `final-cite-check-findings-a.json` / `-b.json` and
-retain/merge every selected ID, verdict and evidence record. Append every
-dangling occurrence exactly once as a critical finding. Final selected/body
-coverage obeys the same strict versioned contract as initial review.
+Use ONE designated existing cite-checker for the entire final report, with
+the verbatim query, decomposition and all final pairs. Follow the agent's
+**Whole-report semantic_review version 1** contract. Keep its complete
+`semantic_review` extension inside `final-cite-check-findings.json`: exact
+revision/inventory/task digests, declared reviewer provenance, global task-fit
+and method rubric, and one explicit unit review per inventory unit. Atomic
+assertions and reasoned nonassertive spans must partition every unit's text.
+Require assertion-specific dispositions, scope, task/method reasoning and
+literal current original-body passages bound to local report citations.
+
+Empirical facts need cited evidence; partial, unsupported or unknown material
+assertions block. Clearly presented proposals, design parameters, pure
+stipulated arithmetic and bounded capture gaps may be uncited with explicit
+classification/basis; they do not become empirical support. Source-dependent
+derivations require cited premises. Check signs, units, denominators,
+universe/horizon, API-versus-format claims, measured-versus-reported results,
+costs/eligibility/point-in-time inputs, feasibility and counterhypotheses.
+Record applicable method judgments rather than generic assurances.
+
+Append every dangling occurrence exactly once as a critical finding. If pair
+work was explicitly sharded, exactly ONE designated owner must supply the
+complete semantic_review; native shard merging preserves it and rejects
+duplicate owners. Never discard extensions or merge incomplete unit reviews.
 
 A current final critical or major finding cannot be cleared by a same-revision resolution log.
 Correct the report/source, reenter final editing when report bytes change
@@ -163,5 +188,10 @@ then `--status done`), extract again and review the fresh selected pairs.
 If application notes are needed, use `final-cite-check-patch-log.json`; preserve
 initial `cite-check-*` files. Never restamp final inputs or erase a finding to
 make the gate green. Run `{hpr_path} run finish <vault_tag> -j` after final
-coverage is complete and no current critical or major finding remains. This validates recorded
-coverage/literal passages, not semantic truth or producer independence.
+coverage and whole-report review are complete and no current critical/major
+finding or blocking semantic judgment remains. Report/source/context changes
+invalidate the review. Quoted body text must occur in a locally cited original
+body; an unrelated vault note cannot clear it. These checks validate recorded
+judgment, coverage and literal passages, not semantic truth, correct
+atomization or producer independence. Legacy/unknown policy runs refuse
+extraction before database synchronization and remain read-only diagnostics.

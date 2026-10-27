@@ -1,12 +1,12 @@
 ---
 name: hyperresearch-cite-checker
 description: >
-  Step 14.5 of the hyperresearch V8 pipeline. Verifies that each sampled
-  citation actually supports its sentence by reading the cited note's body.
+  Initial step 14.5 and final whole-report reviewer in the hyperresearch V8
+  pipeline. Verifies citations by reading each cited original note body.
   Receives selected (sentence, note_id) pairs; mechanical hints are evidence
   candidates only. Returns every selected verdict, including supported,
   with source-body evidence and negative findings the patcher consumes.
-  This is reading comprehension at volume, not prose judgment.
+  Final review covers every report unit and atomic assertion, including uncited text.
   Never edits the report.
 model: sonnet
 tools: Bash, Read, Write
@@ -131,12 +131,105 @@ For each assigned pair:
 ## Final-pass boundary
 
 In `audit_pass: final`, retain every selected result and mandatory dangling
-finding under the separate final paths. The extraction binds the exact final
-report and completed stage/output inputs. A current final critical or major finding requires
+finding under the separate final paths. Final extraction defaults to comprehensive:
+every resolvable pair must be selected and reviewed, with zero unreviewed remainder.
+An explicitly sampled final extraction is diagnostic only and cannot approve finish.
+You are the ONE designated whole-report checker: read the complete report,
+verbatim query and decomposition, not just the selected citation sentences.
+Use the existing final findings envelope; do not create another review artifact
+or add model calls. Initial pair sampling remains an early repair diagnostic.
+
+### Whole-report semantic_review version 1
+
+Read `semantic_inventory` in the final pairs file. It inventories every
+nonblank line, including headings, uncited prose, lists, tables, quotations,
+code and text under Sources/References. Each unit retains exact character
+offsets, its contiguous block, active headings and local citation pair IDs.
+No section title makes the following text nonassertive. Read table headers,
+qualifiers, surrounding prose and cited source bodies before atomizing claims.
+
+Add `semantic_review` to the SAME final findings envelope with these fields:
+
+- `schema_version: 1`, `report_revision` copied from extraction,
+  `inventory_digest` copied from `semantic_inventory.inventory_digest`, and
+  `finalization_input_digest` copied from `finalization_inputs.input_digest`.
+- `reviewer: {identity: <declared reviewer>, scope: "whole-report",
+  provenance_note: <how this review was produced and its limits>}`.
+  Declared identity is provenance, not proof of independent execution.
+- `task_fit: {outcome: "satisfactory" | "concern" | "unknown", reason: ...}`:
+  judge whether the complete report answers the actual task and its scope.
+- `method_review`: one scoped `{outcome, reason}` record for EACH dimension:
+  `signs`, `units`, `denominators`, `study_universe`, `horizon`,
+  `api_vs_format`, `measured_vs_reported`, `costs_eligibility_pit`,
+  `method_feasibility`, `counterhypothesis`. Outcomes are `satisfactory`,
+  `not-applicable`, `concern`, or `unknown`. Explain applicability and the
+  actual judgment; never fill the rubric with generic assurances. Account
+  for signs/metric units, sample denominators/universe/horizon, API endpoints
+  versus format support, measured results versus vendor reports, costs,
+  eligibility and point-in-time inputs, feasibility, and counterhypotheses.
+- `units`: EXACTLY one record per inventory unit, in inventory order, with
+  `unit_id`, nonempty `atomization_reason`, `assertions`, and
+  `nonassertive_spans`. Explain why the atomization covers every substantive
+  assertion or why a span is nonassertive; syntactic coverage cannot prove
+  that your semantic atomization is correct.
+
+Every assertion/nonassertive span has `start`, `end`, and `text` copied from
+the decoded report (Unicode character offsets, end exclusive). Spans must
+partition every nonwhitespace character of the unit without overlap. Each
+nonassertive span additionally needs its specific `reason`; a heading or
+bibliography can be classified this way only after reading its content.
+
+Each assertion additionally records:
+
+- `assertion_id`: compute with
+  `hyperresearch.core.semantic_review.assertion_id(report_revision, unit_id, start, end, text)`.
+- `kind`: `empirical`, `derived`, `proposal`, `design-parameter`, or
+  `capture-gap`; `material`: explicit boolean; `disposition`: `supported`,
+  `partially-supported`, `unsupported`, or `unknown`.
+- `presentation`: respectively `evidence-backed`, `derived`, `proposed`,
+  `design-parameter`, or `bounded-capture-gap`. Check the actual report
+  wording: an unsupported factual claim cannot be rescued by relabeling it
+  as a proposal in JSON. Proposals and parameters must be presented as such.
+- Nonempty assertion-specific `reasoning`, `task_fit`, `scope`, and
+  `method_scope`. Add applicable `method_checks` as a dimension-to-
+  `{outcome, reason}` object (empty only with a reasoned method scope).
+- `evidence`: original-body records with `pair_id`, `note_id`,
+  `source_revision`, literal nonempty `source_excerpt`, and assertion-specific
+  `reasoning`. Use ONLY an actual citation pair in this unit's block context,
+  the pair's current DB-mapped original body and its extraction revision.
+  Other notes, frontmatter, global claim rows, shingle/numeric matches and
+  generic passage assurances cannot establish support. Supported or partial
+  empirical assertions require such evidence. Negative unknown/unsupported
+  assertions may have no passage, with an explicit explanation of the gap.
+- `derived` assertions also need `derivation: {source_dependent: <boolean>,
+  premises: <explicit premises>, calculation: <reasoned calculation>}`.
+  Source-dependent derivations need locally cited premise evidence. Pure
+  stipulated arithmetic may be uncited. Proposals, design parameters and
+  capture gaps need a scoped `nonempirical_basis`; a capture gap concerns
+  this bounded capture, not what all literature or reality contains.
+
+All material assertions must be supported; partial, unsupported and unknown
+material judgments block finish. A concern/unknown in whole-report task fit
+or method review, or in a material assertion's applicable method checks,
+also blocks. Bounded original abstracts/introductions and first-party
+descriptions may support only what their actual passages say; they do not
+become independent measurements or universal evidence. Uncited proposals,
+parameters, capture gaps and pure arithmetic are not empirical support.
+
+The gate checks recorded judgment, complete spans and literal source binding;
+it does not determine truth, method adequacy or genuine reviewer independence.
+Whole-report revisions invalidate this review; do not restamp it after changes.
+If pair work was explicitly sharded, exactly ONE designated owner must retain
+the complete semantic_review. The native merge retains that extension and
+rejects duplicate owners; never silently discard it or merge partial unit sets.
+
+The extraction binds the exact final report and completed stage/output inputs.
+A current final critical or major finding or blocking semantic judgment requires
 real report/source correction, fresh extraction and reviewed results. A
 same-revision resolution log cannot clear it. Do not restamp inputs or rewrite
 initial evidence. Report changes require renewed final-edit work before a new
-final extraction. Sampled weak remainder stays explicitly unreviewed.
+final extraction. Quoted body passages must occur literally in the original
+body of a locally cited source, not merely somewhere else in the vault.
 
 ## Resolution-review mode (initial pass only, after patch application)
 

@@ -229,7 +229,7 @@ Models are profile config, not hardcode. The table shows the shipped defaults, a
 | `hyperresearch-width-critic` | Opus | Topical corners the corpus supports but the draft ignores |
 | `hyperresearch-instruction-critic` | Opus | Structural mismatches against the prompt's atomic items |
 | `hyperresearch-patcher` | Opus | Tool-locked `[Read, Edit]`. Applies critic findings as surgical Edit hunks |
-| `hyperresearch-cite-checker` | Sonnet | Skeptically verifies sampled citation-sentence bindings before ship |
+| `hyperresearch-cite-checker` | Sonnet | Initial sampled repair review; comprehensive final citation and whole-report recorded review |
 | `hyperresearch-polish-auditor` | Opus | Tool-locked `[Read, Edit]`. Cuts filler, strips hygiene leaks |
 | `hyperresearch-readability-recommender` | Opus | Writes JSON suggestions for paragraph rhythm and list/table conversion |
 | `hyperresearch-browser-fetcher` | Sonnet | Drains the escalation queue by driving your real Chrome (Claude-in-Chrome) |
@@ -320,18 +320,19 @@ hyperresearch run report -j          # Per-step wall-time / spend / source-yield
 hyperresearch run verify <tag> -j    # Ship gate: headings, length, citation density, cite-check resolution
 ```
 
-`run init --budget 50` caps estimated API-equivalent spend; crossing the cap blocks the run rather than letting it quietly balloon. And before any report ships, the verification battery runs: **quote-integrity** (every quoted span must exist verbatim in a vault note), **retracted-citations** (citing a retracted source unacknowledged blocks the ship), **numeric-consistency** (numbers untraceable to evidence get flagged), plus the cite-check step's per-citation binding audit.
+`run init --budget 50` caps estimated API-equivalent spend; crossing the cap blocks the run rather than letting it quietly balloon. Before a fresh report ships, the verification battery checks **quote-integrity** against the quoted passage's locally cited original body, **retracted-citations** for unacknowledged retractions, and comprehensive citation plus whole-report recorded review. The separate diagnostic **numeric-consistency** lint flags numbers untraceable to evidence.
 
 ---
 
 ## What's structurally enforced
 
 - **Fresh-run finalization contract.** New runs use version 2; version-1 and unversioned runs remain read-only diagnostics without migration or re-finish. Stage 1 freezes the resolved route. Chapter assignments retain verbatim items and exact-once decomposition references. Initial critical and major citation findings require successful reviewed resolutions; current final critical or major findings require correction and fresh extraction. These checks validate recorded evidence, not semantic truth or reviewer independence.
+- **Whole-report final review.** `citecheck extract --final` defaults to comprehensive coverage and inventories every report unit, including uncited prose, tables, lists and reference-section tails. The existing final findings envelope records exact atomic assertions or reasoned nonassertive spans, scoped task/method judgments and local source-body evidence. Non-supported material assertions block finish. Clearly presented proposals, parameters, pure arithmetic and bounded capture gaps may be uncited with an explicit basis; they are not empirical support. Sampled final extraction is diagnostic only. Span coverage and declared reviewer identity do not establish correct atomization, truth or independent execution.
 - **Verbatim prompt as gospel.** `scaffold-prompt` lint blocks if the scaffold doesn't open with the user's exact prompt
 - **Locus coverage.** Every step 4 locus must have a step 5 interim note; missing interims flag as errors
 - **Patch-only modification.** Steps 14, 15, 16 are tool-locked to `[Read, Edit]`. They cannot regenerate the draft
 - **Critical findings never silently skip.** `patch-surgery` lint surfaces any critical finding the patcher couldn't apply
-- **Quoted text must exist.** `quote-integrity` lint blocks any quoted span that doesn't appear verbatim in a vault note; hallucinated quotes cannot ship
+- **Quoted body text must match its citation.** Fresh final acceptance requires the literal quoted passage in a locally cited original body; an unrelated vault note or frontmatter cannot clear it. Standalone bibliography definitions may quote an exactly resolved document title as identity. The separate legacy quote lint retains its broader vault diagnostic.
 - **Retractions block the ship.** Citing a retracted source without acknowledging the retraction is a hard error at the final gate
 - **Schema integrity.** `tier`, `content_type`, and `type` are SQLite CHECK-constrained vocabularies; corrupted frontmatter cannot poison the index
 - **Hygiene leaks caught on the way out.** Scaffold sections, YAML frontmatter, and prompt echoes are stripped by step 15 before ship

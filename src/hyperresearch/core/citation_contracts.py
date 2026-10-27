@@ -314,7 +314,7 @@ def _identities(value: object, field: str) -> list[str]:
     return value
 
 
-def validate_coverage(pairs_payload: object, findings_payload: object, vault) -> dict:
+def validate_coverage(pairs_payload: object, findings_payload: object, vault, *, source_cache: dict | None = None) -> dict:
     """Reconcile exact selected results, negative findings, and source inputs.
 
     This validates recorded selected work and literal body passages, not
@@ -376,7 +376,7 @@ def validate_coverage(pairs_payload: object, findings_payload: object, vault) ->
         raise CitationContractError("results selected_pair_ids do not cover exact selected set")
     by_id = {pair["pair_id"]: pair for pair in routed}
     findings_by_pair = {item["pair_id"]: item for item in findings.findings}
-    source_cache: dict = {}
+    source_cache = {} if source_cache is None else source_cache
     for pair in routed:
         if pair["note_id"] is None:
             item = findings_by_pair.get(pair["pair_id"])
@@ -440,6 +440,7 @@ def merge_findings_shards(pairs_payload: object, shards: list[object], vault) ->
     merged = {"schema_version": CONTRACT_VERSION, "report_revision": pairs.report_revision,
               "selected_pair_ids": [], "results": [], "findings": []}
     seen: set[str] = set()
+    semantic_owners = 0
     for shard in shards:
         parsed = parse_findings(shard)
         bind_findings(parsed, pairs)
@@ -454,6 +455,11 @@ def merge_findings_shards(pairs_payload: object, shards: list[object], vault) ->
         merged["selected_pair_ids"].extend(ids)
         merged["results"].extend(records)
         merged["findings"].extend(parsed.findings)
+        if "semantic_review" in shard:
+            semantic_owners += 1
+            if semantic_owners > 1:
+                raise CitationContractError("exactly one shard may own the complete semantic_review")
+            merged["semantic_review"] = shard["semantic_review"]
     # Shards may finish in any order; use the extraction's canonical ID order.
     merged["selected_pair_ids"] = [identity for identity in pairs_payload.get("selected_pair_ids", []) if identity in seen]
     if set(merged["selected_pair_ids"]) != seen:

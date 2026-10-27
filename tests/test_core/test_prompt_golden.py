@@ -8,6 +8,11 @@ or template deliberately requires updating the golden, which makes prompt
 changes reviewable instead of silent.
 
 Deliberate deviations already folded into the goldens (2026-07-19):
+  - Whole-report final review (2026-10-27): comprehensive final pairs plus a
+    versioned semantic_review in the existing findings envelope, exact unit/
+    atomic span coverage, scoped recorded task/method judgments, local original
+    body evidence and honest nonempirical classifications. One final owner
+    retains the complete review; sampled final passes are diagnostic only.
   - Fresh-run v2 policy (2026-10-27): freeze the resolved route at stage 1;
     require reviewed major as well as critical initial resolutions and real
     correction of current final major findings; preserve legacy diagnostics.

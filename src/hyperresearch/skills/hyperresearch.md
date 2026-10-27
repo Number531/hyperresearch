@@ -278,13 +278,22 @@ legitimate polish; it is not approval of the final report.
    ```
    This refuses incomplete/stale stages and writes
    `research/runs/<vault_tag>/final-cite-check-pairs.json`. Spawn the same
-   cite-checker against those final selected pairs, with `audit_pass: final`,
-   and retain every selected supported/negative result plus body evidence in
-   `final-cite-check-findings.json`. Shards retain separate final-prefixed
-   paths and merge without dropping any result. Sampled coverage may retain
-   its declared weak remainder; call it unreviewed. Use
-   `--coverage-mode comprehensive` only when every pair will be reviewed.
-4. Any current final **critical or major** finding requires a real report/source
+   cite-checker as ONE designated whole-report owner, with `audit_pass: final`,
+   the complete report, query/decomposition and every pair. Final extraction
+   defaults to comprehensive; sampled final is diagnostic and cannot finish.
+   Retain every supported/negative pair result plus local original-body
+   evidence and the versioned `semantic_review` extension in
+   `final-cite-check-findings.json`. Review every inventory unit, including
+   uncited prose/tables/lists/quotes and reference-section tails, with exact
+   atomic assertion or reasoned nonassertive span coverage. Record scoped
+   task-fit/method judgments, materiality and explicit dispositions. Empirical
+   support requires locally cited current original-body passages; clearly
+   labeled proposals/parameters/bounded gaps and pure arithmetic may be
+   uncited with a reasoned basis. Source-dependent calculations need cited
+   premises. Pair shards, when explicitly used, preserve one complete review
+   owner and every result; they cannot silently discard extension fields.
+4. Any current final **critical or major** finding, non-supported material
+   assertion, or blocking task/method judgment requires a real report/source
    correction followed by fresh extraction and reviewed results. A same-byte
    resolution log cannot clear it. If the report changed, rerun the affected
    final-edit work (at least step 16 running/done) before extracting again.
@@ -297,8 +306,9 @@ legitimate polish; it is not approval of the final report.
 
 `run finish` checks report structure/length/citation density, existing blocking
 content lints, required stage flags and output shapes, initial review history,
-and exact final citation extraction/selected coverage against current source
-bodies. Its existing manifest receipt binds the report, stages, outputs,
+and comprehensive final citation plus whole-report recorded review against
+current locally cited source bodies. Quoted body passages cannot borrow an
+unrelated note's text. Its existing manifest receipt binds the report, stages, outputs,
 profile/config and blocking lint outcomes. Mutations during verification or
 persistence reject approval. `run status`/`run resume` identify stale approvals;
 a current session's Stop hook cannot treat numbered flags alone as finish.

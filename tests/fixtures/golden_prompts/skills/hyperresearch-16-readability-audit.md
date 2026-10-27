@@ -169,10 +169,14 @@ recommendations and decisions are valid and all chosen edits are complete.
 This binds the exact final report revision and stable stage/output inputs.
 Return to the entry skill's **Final integrity gate**: run
 `{hpr_path} citecheck extract <vault_tag> --final -j`, complete the separate
-final selected-pair review in `final-cite-check-findings.json`, then run
+final comprehensive pair and whole-report `semantic_review` in the existing
+`final-cite-check-findings.json` envelope, then run
 `{hpr_path} run finish <vault_tag> -j`. Preserve initial citation artifacts.
 
-A current final critical or major finding blocks finish until correction and
+A sampled final pass cannot approve finish. Review every report unit and
+atomic assertion or reasoned nonassertive span, including uncited prose and
+reference-section tails. A current final critical/major finding or any
+non-supported material assertion or blocking task/method judgment blocks finish until correction and
 fresh extraction/review. If later corrections change the report, reenter the affected final-edit work
 with step 16 running/done, then extract and review fresh final pairs. Repeating
 a done flag without renewed work cannot restamp changed inputs. Only a current

@@ -147,6 +147,63 @@ def _check_quote_integrity(vault, conn, report_path, report_text) -> list[dict]:
     return issues
 
 
+def _check_cited_quote_integrity(
+    vault, conn, report_path, report_text, *, pairs=None, source_cache=None,
+) -> list[dict]:
+    """Current final acceptance: literal quotes must occur in a locally cited body.
+
+    The legacy FTS diagnostic above remains available. A different vault note,
+    metadata, extracted claim row or stemmed paraphrase cannot clear this gate.
+    """
+    from hyperresearch.core.citation_contracts import report_revision, source_input
+    from hyperresearch.core.citecheck import extract_pairs
+    from hyperresearch.core.semantic_review import build_inventory
+
+    pairs = extract_pairs(report_text, conn, whole_report=True) if pairs is None else pairs
+    inventory = build_inventory(report_text, report_revision(report_text.encode("utf-8")), pairs)
+    by_pair = {pair["pair_id"]: pair for pair in pairs}
+    cache = {} if source_cache is None else source_cache
+    issues = []
+    for match in _QUOTE_SPAN_RE.finditer(report_text):
+        quote = re.sub(r"\s+", " ", match.group(1)).strip()
+        if len(quote.split()) < 5:
+            continue
+        # A standalone reference definition may quote the exact original
+        # document title. That is bibliographic identity, not a claimed body
+        # quotation. No other Sources-section prose receives this exemption.
+        line_start = report_text.rfind("\n", 0, match.start()) + 1
+        line_end = report_text.find("\n", match.end())
+        line_end = len(report_text) if line_end < 0 else line_end
+        line = report_text[line_start:line_end]
+        headings = list(re.finditer(r"^##\s+(.+)$", report_text[:line_start], re.M))
+        definition = re.fullmatch(r'\s*\[\d{1,3}\]\s+["“]([^"“”]+)["”]\.?' + r'\s+(https?://\S+)\s*', line)
+        if definition and headings and re.match(r"(?:Sources|References)\b", headings[-1][1], re.I):
+            title_rows = conn.execute(
+                "SELECT n.title FROM notes n LEFT JOIN sources s ON s.note_id = n.id "
+                "WHERE s.url = ? OR n.source = ?", (definition[2], definition[2]),
+            ).fetchall()
+            if any(quote == re.sub(r"\s+", " ", row["title"]).strip() for row in title_rows):
+                continue
+        contexts = [unit["context"] for unit in inventory["units"]
+                    if unit["context"]["block_start"] <= match.start()
+                    and match.end() <= unit["context"]["block_end"]]
+        local_ids = {identity for context in contexts for identity in context["pair_ids"]}
+        found = False
+        for identity in local_ids:
+            note_id = by_pair[identity]["note_id"]
+            if note_id is None:
+                continue
+            snapshot, body = source_input(vault, note_id, cache)
+            if snapshot["body_status"] == "available" and quote in re.sub(r"\s+", " ", body):
+                found = True
+                break
+        if not found:
+            issues.append({"rule": "quote-integrity", "severity": "error", "note_id": "<report>",
+                           "note_path": str(report_path),
+                           "message": f'Quoted span not found literally in a locally cited source body: "{quote[:120]}"'})
+    return issues
+
+
 def _check_numeric_consistency(vault, conn, report_path, report_text) -> list[dict]:
     """Substantive numbers in the report should be traceable to claims or
     cited note bodies. Warning severity — legitimate derived arithmetic

@@ -17,7 +17,7 @@ def citecheck_extract(
     vault_tag: str = typer.Argument(..., help="Run tag (pairs file lands in the run workspace)"),
     report: str | None = typer.Option(None, "--report", help="Report path (default: research/notes/final_report_<tag>.md)"),
     sample_rate: float = typer.Option(0.6, "--sample-rate", help="Fraction of weak (non-number-bearing) needs-llm pairs to check; number-bearing sentences are always 100%"),
-    coverage_mode: str = typer.Option("sampled", "--coverage-mode", help="sampled (explicit weak remainder) or comprehensive (every pair selected)"),
+    coverage_mode: str | None = typer.Option(None, "--coverage-mode", help="Default comprehensive with --final, sampled otherwise; sampled final is diagnostic and cannot finish"),
     final: bool = typer.Option(False, "--final", help="Final audit after completed final edits; preserve initial citation artifacts"),
     json_output: bool = typer.Option(False, "--json", "-j", help="JSON output"),
 ) -> None:
@@ -49,6 +49,18 @@ def citecheck_extract(
             console.print(f"[red]Error:[/] {e}")
         raise typer.Exit(1)
 
+    # Reject legacy extraction before auto_sync can open/migrate its database.
+    from hyperresearch.core.runs import RunError, is_current_run, load_manifest, manifest_path
+
+    try:
+        if manifest_path(vault, vault_tag).exists() and not is_current_run(load_manifest(vault, vault_tag)):
+            raise RunError("legacy/unknown finalization contract: read-only diagnostic; extraction refused")
+    except (RunError, OSError, ValueError) as exc:
+        if json_output:
+            output(error(str(exc), "LEGACY_DIAGNOSTIC"), json_mode=True)
+        else:
+            console.print(f"[red]Error:[/] {exc}")
+        raise typer.Exit(1) from exc
     vault.auto_sync()
     report_path = Path(report) if report else (
         vault.notes_dir / f"final_report_{vault_tag}.md"

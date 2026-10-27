@@ -66,3 +66,42 @@ Its independent test selection ran on the clean checkpoint: 28 passed,
 exit 0 in 3.228s (`checks/P0/audit/INDEPENDENT-PROBES/output.log`). The parent
 reconciled that result and accepted P0. No semantic truth or producer
 independence is certified. P1/P2 were explicitly excluded from this audit.
+
+## P1 baseline and readiness
+
+Exact clean phase base: `4fe696179aef6aac01a830659b4f3d6dbb521c42`.
+Readiness CLI: `phase-dependency-readiness-v1`, ready true for phase 1,
+current parsed-plan SHA/current HEAD/P0 checks and zero-finding audit bound.
+An initial Node import wrapper failed before invoking that CLI; read-only
+baseline checks started before the wrapper was corrected. The actual CLI
+passed before any P1 implementation/test edit. No source or research mutation
+occurred during that procedural correction.
+
+- P1-REGRESSION: `python -m pytest tests/test_core/ -q` passed, 85.148s.
+- P1-LINT: `python -m ruff check .` passed, 0.190s.
+
+Logs: `checks/P1/baseline/`. No new core failure relative to initial full-suite
+baseline. P1 remains inside existing final citation artifacts and gate seams.
+
+## P1 implementation and checks
+
+P1-D1 requires comprehensive final pairs, complete unit/span coverage and
+explicit atomic dispositions/task-method judgments inside existing final
+findings. Source evidence is current, literal and bound to local report
+citations. Legacy extraction refuses before synchronization. Quote acceptance
+uses cited bodies; exact resolved bibliography titles are identity metadata.
+One final checker owns the whole report; shard merging preserves that review.
+
+Behavioral red `P1/red/COVERAGE-GUARDS`: all four intended false acceptances
+reproduced, exit 1, 2.418s. Initial focused check exposed two existing fixtures
+which depended on the old FTS quote helper/uncited positive quote. Updated
+them to the new current helper and actual cited-file mutation; no guard was
+waived. Original failures and two import-format lint failures are retained.
+
+P1-REGRESSION (`python -m pytest tests/test_core/ -q`) passed, 69.053s.
+Only test import formatting changed afterward; focused changed-module check
+passed all 62 cases in 3.287s. P1-LINT passed, 0.082s. See
+`checks/P1/final/REGRESSION/` and `checks/P1/close/`. No new core failures.
+Recorded classifications, atomization, entailment and reviewer identity remain
+judgments, not machine-certified truth/independence. P2 quotas are not yet
+implemented. Independent phase audit follows the local checkpoint.

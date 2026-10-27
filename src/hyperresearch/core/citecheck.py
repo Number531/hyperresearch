@@ -92,7 +92,9 @@ def parse_sources_section(report_text: str, conn) -> dict[str, str | None]:
     return mapping
 
 
-def extract_pairs(report_text: str, conn, *, revision: str | None = None) -> list[dict]:
+def extract_pairs(
+    report_text: str, conn, *, revision: str | None = None, whole_report: bool = False,
+) -> list[dict]:
     """All (sentence, note_id) citation bindings in the report.
 
     Pairs whose citation can't be resolved to a vault note get
@@ -102,13 +104,34 @@ def extract_pairs(report_text: str, conn, *, revision: str | None = None) -> lis
     numbered_map = parse_sources_section(report_text, conn)
     known_ids = {row["id"] for row in conn.execute("SELECT id FROM notes")}
 
-    # Strip the Sources section from the checked body
-    body = re.split(r"^##\s+(?:Sources|References)\b", report_text, maxsplit=1, flags=re.M | re.I)[0]
+    # Initial repair diagnostics retain their historical body boundary. Final
+    # extraction includes reference-section prose; a heading cannot hide claims.
+    body = report_text if whole_report else re.split(
+        r"^##\s+(?:Sources|References)\b", report_text, maxsplit=1, flags=re.M | re.I,
+    )[0]
+    headings = list(re.finditer(r"^##\s+(.+)$", body, flags=re.M))
+    reference_ranges = [(heading.start(), headings[index + 1].start() if index + 1 < len(headings) else len(body))
+                        for index, heading in enumerate(headings)
+                        if re.match(r"(?:Sources|References)\b", heading[1], re.I)]
 
     pairs: list[dict] = []
-    for sentence in _split_sentences(body):
+    boundaries = [0] + [match.end() for match in _SENTENCE_SPLIT_RE.finditer(body)]
+    ends = [match.start() for match in _SENTENCE_SPLIT_RE.finditer(body)] + [len(body)]
+    for raw_start, raw_end in zip(boundaries, ends, strict=True):
+        raw = body[raw_start:raw_end]
+        sentence = raw.strip()
+        if not sentence:
+            continue
+        start = raw_start + len(raw) - len(raw.lstrip())
+        end = raw_end - len(raw) + len(raw.rstrip())
         cited: list[tuple[int, str | None, str]] = []
         for m in _NUMBERED_CITE_RE.finditer(sentence):
+            # A leading reference-list declaration is a bibliography label,
+            # not a citation occurrence. Its full line is still inventoried
+            # and must receive explicit semantic classification/review.
+            if (whole_report and m.start() == 0 and _SOURCES_ENTRY_RE.match(sentence)
+                    and "http" in sentence and any(begin <= start < stop for begin, stop in reference_ranges)):
+                continue
             for num in re.split(r"\s*,\s*", m.group(1)):
                 target = numbered_map.get(num)
                 cited.append((m.start(), target if target in known_ids else None, f"[{num}]"))
@@ -124,6 +147,7 @@ def extract_pairs(report_text: str, conn, *, revision: str | None = None) -> lis
                 "pair_id": identity,
                 "finding_id": finding_id(identity),
                 "sentence": sentence,
+                "report_span": {"start": start, "end": end},
                 "note_id": note_id,
                 "citation": citation,
                 "numbers": numbers,
@@ -225,11 +249,20 @@ def sample_needs_llm(pairs: list[dict], sample_rate: float = 0.6) -> list[dict]:
 
 
 def write_pairs_file(
-    vault, vault_tag: str, report_path, sample_rate: float = 0.6, *, coverage_mode: str = "sampled", final: bool = False,
+    vault, vault_tag: str, report_path, sample_rate: float = 0.6, *, coverage_mode: str | None = None, final: bool = False,
 ) -> dict:
     """Extract + triage + sample; write cite-check-pairs.json into the run dir."""
     from hyperresearch.core.citation_contracts import CitationContractError
-    from hyperresearch.core.runs import RunError, finalization_inputs
+    from hyperresearch.core.runs import (
+        RunError,
+        finalization_inputs,
+        is_current_run,
+        load_manifest,
+        manifest_path,
+    )
+
+    if manifest_path(vault, vault_tag).exists() and not is_current_run(load_manifest(vault, vault_tag)):
+        raise CitationContractError("legacy/unknown finalization contract: read-only diagnostic; extraction refused")
 
     final_inputs = None
     if final:
@@ -242,9 +275,11 @@ def write_pairs_file(
     report_bytes = report_path.read_bytes()
     revision = report_revision(report_bytes)
     report_text = report_bytes.decode("utf-8-sig")
-    pairs = extract_pairs(report_text, vault.db, revision=revision)
+    pairs = extract_pairs(report_text, vault.db, revision=revision, whole_report=final)
     triaged = triage_pairs(pairs, vault.db)
 
+    if coverage_mode is None:
+        coverage_mode = "comprehensive" if final else "sampled"
     if coverage_mode not in {"sampled", "comprehensive"}:
         raise CitationContractError("coverage_mode must be sampled or comprehensive")
     if coverage_mode == "comprehensive":
@@ -277,6 +312,9 @@ def write_pairs_file(
         if revision != final_inputs["report_revision"] or final_inputs != finalization_inputs(vault, vault_tag):
             raise CitationContractError("inputs changed during final extraction")
         out["finalization_inputs"] = final_inputs
+        from hyperresearch.core.semantic_review import build_inventory
+
+        out["semantic_inventory"] = build_inventory(report_text, revision, pairs)
     filename = "final-cite-check-pairs.json" if final else "cite-check-pairs.json"
     (run_dir / filename).write_text(
         json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8"

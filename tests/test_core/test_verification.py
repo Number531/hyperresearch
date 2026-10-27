@@ -62,7 +62,8 @@ def _write_supported_audit(vault, tag, report, *, final=False, rate=1.0):
     from hyperresearch.core.citation_contracts import source_input
     from hyperresearch.core.citecheck import write_pairs_file
 
-    pairs = write_pairs_file(vault, tag, report, sample_rate=rate, final=final)
+    pairs = write_pairs_file(vault, tag, report, sample_rate=rate, final=final,
+                             coverage_mode="sampled" if rate < 1 else "comprehensive")
     payload = {"schema_version": 1, "report_revision": pairs["report_revision"],
                "selected_pair_ids": pairs["selected_pair_ids"], "findings": [], "results": []}
     for pair in pairs["sampled_for_llm"]:
@@ -70,9 +71,61 @@ def _write_supported_audit(vault, tag, report, *, final=False, rate=1.0):
         payload["results"].append({"pair_id": pair["pair_id"], "verdict": "supported",
                                    "source_revision": snapshot["revision"], "source_excerpt": body.strip()[:80],
                                    "evidence": "Synthetic recorded literal-body review."})
+    if final:
+        payload["semantic_review"] = _synthetic_semantic_review(vault, pairs)
     name = "final-cite-check-findings.json" if final else "cite-check-findings.json"
     (vault.run_dir(tag) / name).write_text(json.dumps(payload), encoding="utf-8")
     return pairs, payload
+
+
+def _synthetic_semantic_review(vault, pairs):
+    """Explicit judgments for these synthetic structural fixtures only.
+
+    This helper is not production inference. Cited fixture lines are declared
+    one synthetic assertion; uncited headings/filler are explicitly classified
+    nonassertive. Adversarial semantic tests author their own classifications.
+    """
+    from hyperresearch.core.citation_contracts import source_input
+    from hyperresearch.core.semantic_review import METHOD_DIMENSIONS, assertion_id
+
+    by_id = {pair["pair_id"]: pair for pair in pairs["pairs"]}
+    review = {"schema_version": 1, "report_revision": pairs["report_revision"],
+              "inventory_digest": pairs["semantic_inventory"]["inventory_digest"],
+              "finalization_input_digest": pairs["finalization_inputs"]["input_digest"],
+              "reviewer": {"identity": "synthetic-fixture-author", "scope": "whole-report",
+                           "provenance_note": "Test-authored judgments; no independent model execution claimed."},
+              "task_fit": {"outcome": "satisfactory", "reason": "Fixture report exercises the synthetic query's structural acceptance path."},
+              "method_review": {dimension: {"outcome": "not-applicable",
+                  "reason": f"Synthetic concurrent-I/O fixture supplies no external {dimension} measurement or method claim."}
+                  for dimension in METHOD_DIMENSIONS}, "units": []}
+    cache = {}
+    for unit in pairs["semantic_inventory"]["units"]:
+        record = {"unit_id": unit["unit_id"], "atomization_reason":
+                  "The fixture author supplies each cited line as one synthetic premise; other lines are structural headings or filler.",
+                  "assertions": [], "nonassertive_spans": []}
+        local = [by_id[identity] for identity in unit["context"]["pair_ids"] if by_id[identity]["note_id"]]
+        local = [pair for pair in local if pair["report_span"]["start"] >= unit["start"]
+                 and pair["report_span"]["end"] <= unit["end"]] or local[:1]
+        span = {key: unit[key] for key in ("start", "end", "text")}
+        if local and unit["kind"] != "heading":
+            evidence = []
+            for pair in local:
+                snapshot, body = source_input(vault, pair["note_id"], cache)
+                evidence.append({"pair_id": pair["pair_id"], "note_id": pair["note_id"],
+                                 "source_revision": snapshot["revision"], "source_excerpt": body.strip()[:80],
+                                 "reasoning": "Synthetic body describes the concurrent input/output premise in this fixture line."})
+            record["assertions"] = [{**span, "assertion_id": assertion_id(pairs["report_revision"], unit["unit_id"], **span),
+                "kind": "empirical", "presentation": "evidence-backed", "material": True, "disposition": "supported",
+                "reasoning": "Fixture-author judgment of the supplied concurrent-I/O statement, not a model truth proof.",
+                "task_fit": "This supplied premise is the content the synthetic query asks to report.",
+                "scope": "Only this synthetic source description; no comparative or quantitative inference.",
+                "method_scope": "No numerical or benchmark inference is made in this fixture premise.",
+                "method_checks": {}, "evidence": evidence}]
+        else:
+            record["nonassertive_spans"] = [{**span, "reason":
+                "Synthetic structural heading or repeated filler used for report length/format tests; no external assertion is supplied."}]
+        review["units"].append(record)
+    return review
 
 
 def _complete_light(vault, tag, report):
@@ -162,6 +215,65 @@ def _complete_profile(vault, tag, profile="full"):
     set_step(vault, tag, "16", "done")
     _write_supported_audit(vault, tag, report, final=True)
     return report
+
+
+class TestP1WholeReportAcceptance:
+    """Synthetic recorded judgments; these are not a semantic accuracy test."""
+
+    def test_sampled_final_cannot_approve(self, cited_vault):
+        from hyperresearch.core.runs import finish_run
+
+        tag = "p1-sampled-final"
+        report = _complete_profile(cited_vault, tag, "light")
+        _write_supported_audit(cited_vault, tag, report, final=True, rate=0.25)
+        assert not finish_run(cited_vault, tag)["verify"]["passed"]
+
+    def test_absent_whole_report_review_cannot_approve(self, cited_vault):
+        from hyperresearch.core.runs import finish_run
+
+        tag = "p1-no-whole-review"
+        _complete_profile(cited_vault, tag, "light")
+        path = cited_vault.run_dir(tag) / "final-cite-check-findings.json"
+        payload = json.loads(path.read_text())
+        payload.pop("semantic_review", None)
+        path.write_text(json.dumps(payload))
+        assert not finish_run(cited_vault, tag)["verify"]["passed"]
+
+    @pytest.mark.parametrize("final", [False, True])
+    def test_legacy_extraction_refuses_before_sync_or_database(self, tmp_vault, monkeypatch, final):
+        from typer.testing import CliRunner
+
+        from hyperresearch.cli import app
+        from hyperresearch.core.runs import manifest_path
+        from hyperresearch.core.vault import Vault
+
+        tag = "p1-legacy-extract"
+        init_run(tmp_vault, tag)
+        path = manifest_path(tmp_vault, tag)
+        manifest = json.loads(path.read_text())
+        manifest["finalization_version"] = 1
+        path.write_text(json.dumps(manifest))
+        (tmp_vault.notes_dir / f"final_report_{tag}.md").write_text("Legacy report.")
+        before = {p: p.read_bytes() for p in tmp_vault.root.rglob("*") if p.is_file()}
+        calls = []
+
+        def forbidden_sync(vault):
+            calls.append("sync")
+            raise AssertionError("legacy extraction may not sync")
+
+        def forbidden_database(vault):
+            calls.append("db")
+            raise AssertionError("legacy extraction may not open database")
+
+        monkeypatch.setattr(Vault, "auto_sync", forbidden_sync)
+        monkeypatch.setattr(Vault, "db", property(forbidden_database))
+        monkeypatch.chdir(tmp_vault.root)
+        arguments = ["citecheck", "extract", tag, "--json"] + (["--final"] if final else [])
+        result = CliRunner().invoke(app, arguments)
+        assert result.exit_code == 1
+        assert calls == []
+        assert "diagnostic" in result.stdout.lower()
+        assert {p: p.read_bytes() for p in tmp_vault.root.rglob("*") if p.is_file()} == before
 
 
 class TestP0AcceptanceContract:
@@ -1640,13 +1752,13 @@ class TestFinalizationContract:
         if during == "verify":
             from hyperresearch.cli import lint
 
-            original_lint = lint._check_quote_integrity
+            original_lint = lint._check_cited_quote_integrity
 
-            def mutate_lint(*args):
+            def mutate_lint(*args, **kwargs):
                 report.write_bytes(report.read_bytes() + b"\n")
-                return original_lint(*args)
+                return original_lint(*args, **kwargs)
 
-            monkeypatch.setattr(lint, "_check_quote_integrity", mutate_lint)
+            monkeypatch.setattr(lint, "_check_cited_quote_integrity", mutate_lint)
         elif during == "before-save":
             def mutate_verify(*args):
                 result = original_verify(*args)
@@ -1688,7 +1800,9 @@ class TestFinalizationContract:
         assert "--final" in position["command"]
         pairs, _ = _write_supported_audit(cited_vault, tag, report, final=True, rate=0.25)
         assert len(pairs["unreviewed_pair_ids"]) == 60
-        assert run_resume_position(cited_vault, load_manifest(cited_vault, tag))["action"] == "finish"
+        assert run_resume_position(cited_vault, load_manifest(cited_vault, tag))["action"] == "final-audit"
+        assert not finish_run(cited_vault, tag)["verify"]["passed"]
+        _write_supported_audit(cited_vault, tag, report, final=True)
         assert finish_run(cited_vault, tag)["verify"]["passed"]
 
     def test_final_cli_refuses_incomplete_inputs_and_uses_distinct_paths(self, cited_vault, monkeypatch):
@@ -1703,6 +1817,8 @@ class TestFinalizationContract:
         result = CliRunner().invoke(app, ["citecheck", "extract", tag, "--final", "--json"])
         assert result.exit_code == 0, result.stdout
         assert json.loads(result.stdout)["data"]["pairs_file"].endswith("final-cite-check-pairs.json")
+        assert json.loads(result.stdout)["data"]["coverage_mode"] == "comprehensive"
+        assert json.loads(result.stdout)["data"]["unreviewed"] == 0
         assert not (cited_vault.run_dir(tag) / "cite-check-pairs.json").exists()
         manifest = load_manifest(cited_vault, tag)
         manifest["steps"]["15"]["status"] = "pending"
@@ -1757,7 +1873,7 @@ class TestFinalizationContract:
         tag = "blocking-inputs"
         report = _complete_profile(cited_vault, tag, "light")
         if kind == "quote-support":
-            report.write_text(report.read_text() + '\nEvidence says "Fundamental patterns for concurrent programming."\n')
+            report.write_text(report.read_text() + '\nEvidence says "Fundamental patterns for concurrent programming." [[concurrency]].\n')
             set_step(cited_vault, tag, "16", "running")
             set_step(cited_vault, tag, "16", "done")
             _write_supported_audit(cited_vault, tag, report, final=True)
@@ -1769,8 +1885,8 @@ class TestFinalizationContract:
             cited_vault.db.execute("UPDATE notes SET is_retracted = 1 WHERE id = 'python-async-patterns'")
             cited_vault.db.commit()
         else:
-            cited_vault.db.execute("DELETE FROM notes_fts WHERE id = 'concurrency'")
-            cited_vault.db.commit()
+            path = cited_vault.notes_dir / "concurrency.md"
+            path.write_text(path.read_text().replace("Fundamental patterns for concurrent programming.", "The captured quotation was corrected."))
         assert status_summary(cited_vault, tag)["approval_current"] is False
         assert verify_run(cited_vault, tag)["passed"] is False
 
