@@ -10,8 +10,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import yaml
 
@@ -194,7 +196,7 @@ def bind_findings(findings: FindingsDocument, pairs: PairsDocument) -> None:
 def validate_resolutions(
     findings: FindingsDocument, payload: object, current_report_revision: str,
 ) -> None:
-    """Require explicit reviewed outcomes for every critical, never log presence.
+    """Require reviewed outcomes for every critical/major, never log presence.
 
     The findings revision names the original audit input. The reviewed revision
     names the post-patch report, which may legitimately have different bytes.
@@ -209,11 +211,11 @@ def validate_resolutions(
         raise CitationContractError("resolution findings_report_revision is stale/unrelated")
     records = _records(payload.get("resolutions"), "resolutions")
     known = {item["finding_id"]: item for item in findings.findings}
-    criticals = {identity for identity, item in known.items() if item["severity"] == "critical"}
-    # Noncritical-only patch passes use this canonical application stub and
+    blocking = {identity for identity, item in known.items() if item["severity"] in {"critical", "major"}}
+    # Minor-only patch passes use this canonical application stub and
     # need no additional review. Any recorded outcome or claimed review still
     # receives strict revision/identity validation below.
-    if not criticals and not records and payload.get("reviewed_report_revision") is None:
+    if not blocking and not records and payload.get("reviewed_report_revision") is None:
         return
     reviewed = _revision(payload.get("reviewed_report_revision"), "reviewed_report_revision")
     if reviewed != _revision(current_report_revision):
@@ -234,9 +236,9 @@ def validate_resolutions(
             if verdict not in {"supported", "claim-removed"}:
                 raise CitationContractError("resolved finding requires a successful reviewed outcome")
             resolved.add(identity)
-    missing = criticals - resolved
+    missing = blocking - resolved
     if missing:
-        raise CitationContractError(f"{len(missing)} critical finding(s) lack reviewed resolution")
+        raise CitationContractError(f"{len(missing)} critical/major finding(s) lack reviewed resolution")
 
 
 def source_input(vault, note_id: str, cache: dict | None = None) -> tuple[dict, str | None]:
@@ -304,6 +306,132 @@ def source_input(vault, note_id: str, cache: dict | None = None) -> tuple[dict, 
     return result
 
 
+def corpus_inputs(vault, vault_tag: str, report_text: str, requirements: dict,
+                  pairs: list[dict], source_cache: dict | None = None) -> dict:
+    """Fresh read-only corpus roster; never sync, ingest or rescore the vault.
+
+    Disk frontmatter discovers unsynced tagged members. DB mapping remains the
+    only route to source bodies, and relevant disk/DB identity drift fails
+    closed. Per-call raw revisions bind every member, including uncited ones.
+    """
+    from hyperresearch.core.citecheck import parse_sources_section
+    from hyperresearch.core.frontmatter import FRONTMATTER_RE
+    from hyperresearch.models.note import slugify
+
+    cache = source_cache if source_cache is not None else {}
+    root, notes = vault.root, vault.notes_dir
+    if root.is_symlink():
+        raise CitationContractError("corpus vault root contains a symlink")
+    component = root
+    try:
+        parts = notes.relative_to(root).parts
+    except ValueError as exc:
+        raise CitationContractError("corpus notes directory escapes vault root") from exc
+    if ".." in parts:
+        raise CitationContractError("corpus notes directory escapes vault root")
+    for part in parts:
+        component /= part
+        if component.is_symlink():
+            raise CitationContractError("corpus notes directory contains a symlink")
+    mapped = {row["id"]: dict(row) for row in vault.db.execute("SELECT id, path, title, source, doi, status, type, content_type FROM notes")}
+    # Match sync's one-hop alias resolution without modifying tags or notes.
+    # DB tags already contain sync's resolved value; resolving those a second
+    # time could incorrectly traverse an alias chain that native sync did not.
+    alias_map = {row["alias"]: row["canonical"] for row in vault.db.execute("SELECT alias, canonical FROM tag_aliases")}
+    scope = vault_tag.lower()
+    scope = alias_map.get(scope, scope)
+    db_tags: dict[str, set[str]] = {}
+    for row in vault.db.execute("SELECT note_id, tag FROM tags"):
+        db_tags.setdefault(row["note_id"], set()).add(row["tag"])
+    tagged = {identity for identity, tags in db_tags.items() if scope in tags}
+    cited = {pair["note_id"] for pair in pairs if pair["note_id"] is not None}
+    bibliography = {identity for identity in parse_sources_section(report_text, vault.db).values() if identity is not None}
+    required = tagged | cited | bibliography
+    disk = {}
+    for path in sorted(notes.rglob("*")):
+        # rglob does not follow directory symlinks, but those entries must be
+        # refused too: checking only *.md would silently omit such subtrees.
+        if path.is_symlink():
+            raise CitationContractError("corpus notes tree contains a symlink")
+        if path.suffix.lower() != ".md" or not path.is_file():
+            continue
+        try:
+            text = path.read_bytes().decode("utf-8-sig")
+            match = FRONTMATTER_RE.match(text)
+            if match is None:
+                continue
+            data = yaml.safe_load(match[1]) or {}
+            if not isinstance(data, dict):
+                raise ValueError("frontmatter must be a mapping")
+            raw_tags = data.get("tags", [])
+            if not isinstance(raw_tags, list) or any(not isinstance(tag, str) for tag in raw_tags):
+                raise ValueError("frontmatter tags must be strings")
+            tags = sorted({tag.lower().strip() for tag in raw_tags})
+            canonical_tags = {alias_map.get(tag, tag) for tag in tags}
+            raw_id = data.get("id", "")
+            if not isinstance(raw_id, str):
+                raise ValueError("frontmatter id must be a string")
+            identity = slugify(raw_id or path.stem)
+            metadata = {key: data.get(key, default) for key, default in (
+                ("title", "Untitled"), ("source", None), ("doi", None), ("status", "draft"),
+                ("type", "note"), ("content_type", None))}
+            if any(value is not None and not isinstance(value, str) for value in metadata.values()):
+                raise ValueError("corpus identity metadata must be strings")
+            metadata.update(id=identity, tags=tags)
+        except (UnicodeError, ValueError, yaml.YAMLError) as exc:
+            raise CitationContractError("corpus disk metadata is unreadable; explicit sync/repair is required") from exc
+        relevant = identity in required or scope in canonical_tags
+        if not relevant:
+            continue
+        if identity in disk:
+            raise CitationContractError("corpus disk note identity is duplicated")
+        relative = path.relative_to(root).as_posix()
+        row = mapped.get(identity)
+        if (row is None or row["path"] != relative or any(row[key] != metadata[key] for key in (
+                "title", "source", "doi", "status", "type", "content_type"))
+                or (scope in canonical_tags) != (identity in tagged)):
+            raise CitationContractError("corpus disk/DB metadata or tagged membership drift; explicit sync is required")
+        disk[identity] = metadata
+        required.add(identity)
+    if required - set(disk):
+        raise CitationContractError("corpus mapped member was deleted or lost valid metadata; explicit sync is required")
+    members = []
+    for identity in sorted(required):
+        snapshot, body = source_input(vault, identity, cache)
+        metadata = disk[identity]
+        doi = metadata["doi"]
+        if doi:
+            doi = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", doi.strip(), flags=re.I).casefold()
+        url = metadata["source"]
+        hints = {"doi": doi, "canonical_url": _corpus_canonical_url(url) if url else None,
+                 "body_digest": report_revision(re.sub(r"\s+", " ", unicodedata.normalize("NFC", body)).strip().encode("utf-8")) if body and body.strip() else None}
+        membership = (["tagged"] if identity in tagged else []) + (["cited"] if identity in cited else []) + (["bibliography"] if identity in bibliography else [])
+        members.append({"note_id": identity, "source_input": snapshot, "metadata": metadata,
+                        "identity_hints": hints, "membership": membership,
+                        "is_final_report": snapshot["path"] == (notes / f"final_report_{vault_tag}.md").relative_to(root).as_posix()})
+    # Claim rows are informational. Reused notes retain their original vault_tag;
+    # count note/hash identity over this corpus, never all global rows or tag rows.
+    claims = [{"note_id": row["note_id"], "claim_hash": row["claim_hash"]}
+              for row in vault.db.execute("SELECT DISTINCT note_id, claim_hash FROM claims ORDER BY note_id, claim_hash")
+              if row["note_id"] in required]
+    content = {"schema_version": 1, "vault_tag": vault_tag, "requirements": requirements,
+               "members": members, "raw_claim_rows": claims}
+    encoded = json.dumps(content, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return {**content, "input_digest": report_revision(encoded)}
+
+
+def _corpus_canonical_url(url: str) -> str:
+    """Conservative identity hint, preserving meaningful path/query case.
+
+    Legacy independence scoring uses broader heuristics. Verification removes
+    only known tracking parameters and fragments, with no network or writes.
+    """
+    parsed = urlsplit(url.strip())
+    query = urlencode([(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                       if not key.casefold().startswith("utm_") and key.casefold() not in {"fbclid", "gclid", "dclid", "msclkid"}])
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, query, ""))
+
+
 def _identities(value: object, field: str) -> list[str]:
     if not isinstance(value, list):
         raise CitationContractError(f"{field} must be an array of pair IDs")
@@ -314,7 +442,7 @@ def _identities(value: object, field: str) -> list[str]:
     return value
 
 
-def validate_coverage(pairs_payload: object, findings_payload: object, vault) -> dict:
+def validate_coverage(pairs_payload: object, findings_payload: object, vault, *, source_cache: dict | None = None) -> dict:
     """Reconcile exact selected results, negative findings, and source inputs.
 
     This validates recorded selected work and literal body passages, not
@@ -376,7 +504,7 @@ def validate_coverage(pairs_payload: object, findings_payload: object, vault) ->
         raise CitationContractError("results selected_pair_ids do not cover exact selected set")
     by_id = {pair["pair_id"]: pair for pair in routed}
     findings_by_pair = {item["pair_id"]: item for item in findings.findings}
-    source_cache: dict = {}
+    source_cache = {} if source_cache is None else source_cache
     for pair in routed:
         if pair["note_id"] is None:
             item = findings_by_pair.get(pair["pair_id"])
@@ -440,6 +568,8 @@ def merge_findings_shards(pairs_payload: object, shards: list[object], vault) ->
     merged = {"schema_version": CONTRACT_VERSION, "report_revision": pairs.report_revision,
               "selected_pair_ids": [], "results": [], "findings": []}
     seen: set[str] = set()
+    semantic_owners = 0
+    corpus_owners = 0
     for shard in shards:
         parsed = parse_findings(shard)
         bind_findings(parsed, pairs)
@@ -454,6 +584,16 @@ def merge_findings_shards(pairs_payload: object, shards: list[object], vault) ->
         merged["selected_pair_ids"].extend(ids)
         merged["results"].extend(records)
         merged["findings"].extend(parsed.findings)
+        if "semantic_review" in shard:
+            semantic_owners += 1
+            if semantic_owners > 1:
+                raise CitationContractError("exactly one shard may own the complete semantic_review")
+            merged["semantic_review"] = shard["semantic_review"]
+        if "corpus_review" in shard:
+            corpus_owners += 1
+            if corpus_owners > 1:
+                raise CitationContractError("exactly one shard may own the complete corpus_review")
+            merged["corpus_review"] = shard["corpus_review"]
     # Shards may finish in any order; use the extraction's canonical ID order.
     merged["selected_pair_ids"] = [identity for identity in pairs_payload.get("selected_pair_ids", []) if identity in seen]
     if set(merged["selected_pair_ids"]) != seen:

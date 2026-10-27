@@ -31,7 +31,7 @@ from pathlib import Path
 
 MANIFEST_VERSION = 1
 MANIFEST_NAME = "run.json"
-FINALIZATION_VERSION = 1
+FINALIZATION_VERSION = 2
 
 # Avg. chars per ASCII-whitespace token above which str.split() word counts
 # are no longer trustworthy (see _lacks_word_boundaries).
@@ -83,6 +83,11 @@ class RunError(ValueError):
 
 def is_current_run(manifest: dict) -> bool:
     return type(manifest.get("finalization_version")) is int and manifest["finalization_version"] == FINALIZATION_VERSION
+
+
+def _require_writable_run(manifest: dict) -> None:
+    if not is_current_run(manifest):
+        raise RunError("legacy/unknown finalization contract: read-only diagnostic; run mutation unavailable")
 
 
 def _now() -> str:
@@ -186,10 +191,11 @@ def record_event(vault, vault_tag: str, event: dict) -> None:
     run_dir = vault.run_dir(vault_tag)
     if not (run_dir / MANIFEST_NAME).exists():
         raise RunError(f"no run '{vault_tag}'")
+    manifest = load_manifest(vault, vault_tag)
+    _require_writable_run(manifest)
     event = {"at": _now(), **event}
     with open(run_dir / EVENTS_NAME, "a", encoding="utf-8") as f:
         f.write(json.dumps(event) + "\n")
-    manifest = load_manifest(vault, vault_tag)
     if event.get("type") == CHAPTER_PLAN_EVENT:
         _fold_chapter_plan(manifest, event)
     _save(vault, vault_tag, manifest)  # heartbeat
@@ -245,8 +251,19 @@ def set_step(
     if status not in STEP_STATUSES:
         raise RunError(f"invalid step status '{status}' (one of {STEP_STATUSES})")
     manifest = load_manifest(vault, vault_tag)
+    _require_writable_run(manifest)
     step = str(step)
     current = is_current_run(manifest)
+    if current and step == "1" and status == "done" and not chapter:
+        tier = _declared_tier(vault.run_dir(vault_tag)) or manifest.get("profile", "full")
+        frozen = manifest.get("resolved_pipeline_tier")
+        if frozen is not None and tier != frozen:
+            raise RunError("pipeline tier changed after stage 1 completion; the resolved route is frozen")
+        requirements = _evidence_requirements(vault, manifest, allow_unfrozen=True)
+        if frozen is None:
+            manifest["resolved_profile_steps"] = _required_stage_ids(manifest, vault.run_dir(vault_tag), vault.config_path)
+            manifest["resolved_pipeline_tier"] = tier
+            manifest["resolved_evidence_requirements"] = requirements
     if chapter and current:
         if _chapter_id_of(chapter) != chapter or "/" in chapter or "\\" in chapter or chapter in {".", ".."}:
             raise RunError("invalid chapter id")
@@ -297,6 +314,7 @@ def add_spend(
     agents_spawned: int = 0,
 ) -> dict:
     manifest = load_manifest(vault, vault_tag)
+    _require_writable_run(manifest)
     spend = manifest["spend"]
     spend["estimated_usd"] = round(spend.get("estimated_usd", 0.0) + estimated_usd, 4)
     spend["sources_fetched"] = spend.get("sources_fetched", 0) + sources_fetched
@@ -318,6 +336,7 @@ def set_status(vault, vault_tag: str, status: str, blocked_on: str | None = None
     if status not in RUN_STATUSES:
         raise RunError(f"invalid run status '{status}' (one of {RUN_STATUSES})")
     manifest = load_manifest(vault, vault_tag)
+    _require_writable_run(manifest)
     if status == "done" and is_current_run(manifest):
         raise RunError("only run finish may mark a current run done")
     manifest["status"] = status
@@ -405,9 +424,9 @@ def _step_sort_key(step: str) -> tuple[int, ...]:
 def run_resume_position(vault, manifest: dict) -> dict:
     """`resume_position` scoped to the tier step 1 declared for this run.
 
-    Same rule as the ship gate (`_required_step_ids`): the decomposition's
-    `pipeline_tier` wins over the manifest profile, so a run step 1
-    classified `light` resumes at step 10, not step 3.
+    Same rule as the ship gate (`_required_step_ids`): current runs use the
+    route frozen at stage 1 completion. A pre-work `light` classification
+    resumes at step 10, not step 3; later decomposition edits cannot shrink it.
     """
     run_dir = vault.run_dir(manifest["vault_tag"])
     current = is_current_run(manifest)
@@ -572,15 +591,14 @@ def _declared_tier(run_dir: Path) -> str | None:
 def _required_step_ids(manifest: dict, run_dir: Path, config_path: Path | None) -> set[str]:
     """Step ids whose artifacts the ship gate demands.
 
-    The router initializes a run with the installed gear and lets step 1
-    reclassify it: "the manifest's profile field is informational — the
-    decomposition's tier rules". So when the decomposition declares a tier
-    that disagrees with the manifest profile, that tier's step set wins;
-    otherwise (no tier, same tier, or a tier that resolves to nothing) the
-    manifest's own `profile_steps` stand.
+    Stage 1 can reclassify the initialized gear before completing. Current
+    runs then retain the frozen route. Before that boundary, and for legacy
+    diagnostics, a resolvable declaration takes precedence over profile_steps.
     """
     from hyperresearch.core.profiles import ProfileError, resolve_profile
 
+    if is_current_run(manifest) and "resolved_pipeline_tier" in manifest:
+        return {str(s) for s in manifest.get("resolved_profile_steps", [])}
     steps = {str(s) for s in manifest.get("profile_steps", [])}
     tier = _declared_tier(run_dir)
     if tier is None or tier == manifest.get("profile"):
@@ -596,7 +614,7 @@ def _required_stage_ids(manifest: dict, run_dir: Path, config_path: Path | None)
     from hyperresearch.core.profiles import BUILTIN_PROFILES
 
     steps = _required_step_ids(manifest, run_dir, config_path)
-    tier = _declared_tier(run_dir) or manifest.get("profile", "full")
+    tier = (manifest.get("resolved_pipeline_tier") if is_current_run(manifest) else None) or _declared_tier(run_dir) or manifest.get("profile", "full")
     # Recorded/configured lists may add work, but cannot waive a known tier's
     # shipped route merely by deleting flags from its recovery manifest.
     if tier in BUILTIN_PROFILES:
@@ -606,6 +624,40 @@ def _required_stage_ids(manifest: dict, run_dir: Path, config_path: Path | None)
     if tier == "dissertation":
         steps.add("1.5")
     return sorted(steps, key=_step_sort_key)
+
+
+def _evidence_requirements(vault, manifest: dict, *, allow_unfrozen: bool = False) -> dict:
+    """Numeric scale gear is independent of the stage-routing tier.
+
+    Freeze its identity and resolved minima at stage 1. Later configuration or
+    task raises apply, while neither can lower the frozen floors.
+    """
+    from hyperresearch.core.profiles import _load_user_overlays, resolve_profile
+
+    gear = manifest.get("profile", "full")
+    profile = resolve_profile(gear, vault.config_path)
+    overlay = _load_user_overlays(vault.config_path).get(gear, {})
+    current = {"gear": gear}
+    decomposition_path = vault.run_dir(manifest["vault_tag"]) / "prompt-decomposition.json"
+    decomposition = _read_json(decomposition_path) if decomposition_path.exists() else {}
+    declared = decomposition.get("evidence_requirements", {}) if isinstance(decomposition, dict) else None
+    if not isinstance(declared, dict) or not set(declared) <= {"source_min", "claims_min"}:
+        raise RunError("evidence requirements must contain only source_min/claims_min")
+    for key in ("source_min", "claims_min"):
+        base = overlay.get(key, getattr(profile, key))
+        requested = declared.get(key, 0)
+        if type(base) is not int or base < 0 or type(requested) is not int or requested < 0:
+            raise RunError("evidence requirements require strict nonnegative integer minima")
+        current[key] = max(base, requested)
+    frozen = manifest.get("resolved_evidence_requirements")
+    if frozen is None:
+        if not allow_unfrozen:
+            raise RunError("evidence requirements were not frozen at stage 1 completion")
+        return current
+    if (not isinstance(frozen, dict) or frozen.get("gear") != gear
+            or any(type(frozen.get(key)) is not int or frozen[key] < 0 for key in ("source_min", "claims_min"))):
+        raise RunError("scale gear identity changed or frozen evidence requirements are invalid")
+    return {"gear": gear, **{key: max(current[key], frozen[key]) for key in ("source_min", "claims_min")}}
 
 
 def _report_path(vault, tag: str) -> Path:
@@ -652,6 +704,42 @@ def _recommendation_records(payload, label: str) -> list[dict]:
     return records
 
 
+def _decomposition_atomic_items(decomposition: object) -> dict[str, object]:
+    """Occurrence identities plus verbatim content, not semantic completeness.
+
+    References disambiguate repeated text and keep entity field obligations
+    distinct. The chapter assignment retains the values for downstream use.
+    """
+    if not isinstance(decomposition, dict):
+        raise RunError("atomic item decomposition must be an object")
+    items = {}
+    for field in ("sub_questions", "entities", "required_formats", "required_sections",
+                  "required_section_headings", "time_horizons", "time_periods", "scope_conditions"):
+        values = decomposition.get(field, [])
+        if not isinstance(values, list):
+            raise RunError(f"atomic item category {field} must be an array")
+        for index, value in enumerate(values):
+            ref = f"/{field}/{index}"
+            if field == "entities" and isinstance(value, dict):
+                if not isinstance(value.get("name"), str) or not value["name"].strip():
+                    raise RunError("atomic entity item requires a name")
+                items[f"{ref}/name"] = value["name"]
+                required = value.get("required_fields", [])
+                if not isinstance(required, list):
+                    raise RunError("atomic entity required_fields must be an array")
+                for offset, requirement in enumerate(required):
+                    if not isinstance(requirement, str) or not requirement.strip():
+                        raise RunError("atomic entity required_fields must contain nonempty text")
+                    items[f"{ref}/required_fields/{offset}"] = requirement
+            elif (isinstance(value, str) and value.strip()) or (field == "time_periods" and isinstance(value, dict) and value):
+                items[ref] = value
+            else:
+                raise RunError(f"atomic item category {field} contains a malformed item")
+    if not items:
+        raise RunError("chapter atomic partition requires decomposition items")
+    return items
+
+
 def _chapter_plan(vault, manifest: dict) -> list[dict]:
     plan = _read_json(vault.run_dir(manifest["vault_tag"]) / "chapter-plan.json")
     if not isinstance(plan, dict):
@@ -666,6 +754,8 @@ def _chapter_plan(vault, manifest: dict) -> list[dict]:
         raise RunError("chapter-plan must contain unique safe chapter ids")
     if not isinstance(manifest.get("chapters"), dict) or set(ids) != set(manifest["chapters"]):
         raise RunError("chapter-plan and registered chapter ids differ")
+    expected = _decomposition_atomic_items(_read_json(vault.run_dir(manifest["vault_tag"]) / "prompt-decomposition.json"))
+    assigned = []
     dependencies = {}
     for chapter in chapters:
         cid = chapter["id"]
@@ -675,7 +765,16 @@ def _chapter_plan(vault, manifest: dict) -> list[dict]:
                 or not isinstance(deps, list) or any(not isinstance(dep, str) or dep not in ids for dep in deps)
                 or len(set(deps)) != len(deps) or cid in deps):
             raise RunError("chapter-plan has malformed chapter/dependencies")
+        refs = chapter.get("atomic_item_refs")
+        values = chapter["atomic_items"]
+        if (not isinstance(refs, list) or not refs or len(refs) != len(values)
+                or any(not isinstance(ref, str) or ref not in expected for ref in refs)
+                or any(_digest(value) != _digest(expected[ref]) for ref, value in zip(refs, values, strict=True))):
+            raise RunError("chapter atomic_items must match aligned decomposition atomic_item_refs")
+        assigned.extend(refs)
         dependencies[cid] = deps
+    if len(assigned) != len(set(assigned)) or set(assigned) != set(expected):
+        raise RunError("chapter atomic items must partition every decomposition item exactly once")
     visiting, visited = set(), set()
 
     def visit(cid):
@@ -878,6 +977,9 @@ def _step_state(manifest: dict) -> dict:
 
     return {
         "profile": manifest.get("profile"), "profile_steps": manifest.get("profile_steps"),
+        "resolved_pipeline_tier": manifest.get("resolved_pipeline_tier"),
+        "resolved_profile_steps": manifest.get("resolved_profile_steps"),
+        "resolved_evidence_requirements": manifest.get("resolved_evidence_requirements"),
         "steps": {key: state(value) for key, value in manifest.get("steps", {}).items()},
         "chapters": {key: {"title": value.get("title"), "steps": {
             step: state(entry) for step, entry in value.get("steps", {}).items()
@@ -887,6 +989,10 @@ def _step_state(manifest: dict) -> dict:
 
 def _stage_inputs(vault, manifest: dict, through: str | None = None) -> dict:
     run_dir = vault.run_dir(manifest["vault_tag"])
+    if is_current_run(manifest):
+        tier = manifest.get("resolved_pipeline_tier")
+        if tier is None or tier != _declared_tier(run_dir):
+            raise RunError("pipeline tier is missing or differs from the route frozen at stage 1 completion")
     stages = _required_stage_ids(manifest, run_dir, vault.config_path)
     stages = [stage for stage in stages if through is None or _step_sort_key(stage) <= _step_sort_key(through)]
     chaptered = "1.5" in stages
@@ -954,7 +1060,7 @@ def _initial_review(vault, manifest: dict) -> dict:
     findings = parse_findings(payload)
     revision = _file_revision(_report_path(vault, manifest["vault_tag"]))
     log = run_dir / "cite-check-patch-log.json"
-    if any(item["severity"] == "critical" for item in findings.findings) or log.exists():
+    if any(item["severity"] in {"critical", "major"} for item in findings.findings) or log.exists():
         validate_resolutions(findings, _read_json(log), revision)
     elif pairs["report_revision"] != revision:
         raise RunError("initial audit report changed without a bound reviewed resolution")
@@ -994,26 +1100,28 @@ def finalization_inputs(vault, vault_tag: str) -> dict:
     _validate_edit_completion(vault, manifest, "16", current_report=True)
     inputs = {"finalization_version": FINALIZATION_VERSION, "vault_tag": vault_tag,
               "report_revision": _file_revision(_report_path(vault, vault_tag)),
+              "evidence_requirements": _evidence_requirements(vault, manifest),
               **_stage_inputs(vault, manifest)}
     return {**inputs, "input_digest": _digest(inputs)}
 
 
 def _verification_inputs(vault, manifest: dict) -> dict:
     """Stable inputs only: exclude status, heartbeat, spend, and the receipt itself."""
-    from hyperresearch.cli.lint import _check_quote_integrity, _check_retracted_citations
-    from hyperresearch.core.citation_contracts import source_input
+    from hyperresearch.cli.lint import _check_cited_quote_integrity, _check_retracted_citations
+    from hyperresearch.core.citation_contracts import corpus_inputs, source_input
     from hyperresearch.core.citecheck import extract_pairs
     from hyperresearch.core.profiles import resolve_profile
 
     run_dir = vault.run_dir(manifest["vault_tag"])
     report = _report_path(vault, manifest["vault_tag"])
     raw = report.read_bytes() if report.exists() else b""
-    pairs = extract_pairs(raw.decode("utf-8-sig"), vault.db)
-    sources = {pair["note_id"]: source_input(vault, pair["note_id"])[0] for pair in pairs if pair["note_id"] is not None}
+    pairs = extract_pairs(raw.decode("utf-8-sig"), vault.db, whole_report=True)
+    source_cache = {}
+    sources = {pair["note_id"]: source_input(vault, pair["note_id"], source_cache)[0] for pair in pairs if pair["note_id"] is not None}
     names = set(_output_specs(vault, manifest)) | {"final-cite-check-pairs.json", "final-cite-check-findings.json", "final-cite-check-patch-log.json"}
     text = raw.decode("utf-8-sig")
     lint_outcomes = {
-        "quote-integrity": _check_quote_integrity(vault, vault.db, report, text),
+        "quote-integrity": _check_cited_quote_integrity(vault, vault.db, report, text, pairs=pairs, source_cache=source_cache),
         "retracted-citations": _check_retracted_citations(vault, vault.db, report, text),
     }
     return {"finalization_version": manifest.get("finalization_version"), "vault_tag": manifest["vault_tag"],
@@ -1022,6 +1130,7 @@ def _verification_inputs(vault, manifest: dict) -> dict:
             "report_revision": "sha256:" + hashlib.sha256(raw).hexdigest(),
             "outputs": {name: _file_revision(run_dir / name) if (run_dir / name).exists() else None for name in sorted(names)},
             "extracted_pairs": pairs, "sources": sources,
+            "corpus_inputs": corpus_inputs(vault, manifest["vault_tag"], text, _evidence_requirements(vault, manifest), pairs, source_cache),
             "profile": resolve_profile(manifest.get("profile", "full"), vault.config_path).model_dump(),
             "config_revision": _file_revision(vault.config_path) if vault.config_path.exists() else None,
             "blocking_lint_outcomes": lint_outcomes}
@@ -1038,8 +1147,14 @@ def approval_current(vault, manifest: dict) -> bool:
 
 
 def _validate_final_audit(vault, manifest: dict) -> dict:
-    from hyperresearch.core.citation_contracts import parse_findings, validate_coverage
+    from hyperresearch.core.citation_contracts import (
+        corpus_inputs,
+        parse_findings,
+        validate_coverage,
+    )
     from hyperresearch.core.citecheck import extract_pairs
+    from hyperresearch.core.evidence import validate_corpus_review
+    from hyperresearch.core.semantic_review import validate_review
 
     run_dir = vault.run_dir(manifest["vault_tag"])
     inputs = finalization_inputs(vault, manifest["vault_tag"])
@@ -1050,17 +1165,26 @@ def _validate_final_audit(vault, manifest: dict) -> dict:
     report = _report_path(vault, manifest["vault_tag"])
     if pairs.get("report_revision") != inputs["report_revision"]:
         raise RunError("final citation report revision is stale")
-    actual = extract_pairs(report.read_bytes().decode("utf-8-sig"), vault.db, revision=inputs["report_revision"])
-    keys = ("pair_index", "pair_id", "finding_id", "sentence", "note_id", "citation", "numbers", "strong")
+    text = report.read_bytes().decode("utf-8-sig")
+    actual = extract_pairs(text, vault.db, revision=inputs["report_revision"], whole_report=True)
+    keys = ("pair_index", "pair_id", "finding_id", "sentence", "note_id", "citation", "numbers", "strong", "report_span")
     def projection(records):
         if any(not isinstance(pair, dict) for pair in records):
             raise RunError("final pairs must be objects")
         return [{key: pair.get(key) for key in keys} for pair in records]
     if not isinstance(pairs.get("pairs"), list) or projection(pairs["pairs"]) != projection(actual):
         raise RunError("final pairs differ from actual report extraction; citation occurrences were dropped or changed")
-    coverage = validate_coverage(pairs, findings, vault)
-    if any(item["severity"] == "critical" for item in parse_findings(findings).findings):
-        raise RunError("current final critical findings require correction and fresh extraction/results; a resolution log cannot clear them")
+    if pairs.get("coverage_mode") != "comprehensive" or pairs.get("unreviewed_pair_ids") != []:
+        raise RunError("final acceptance requires comprehensive citation coverage; sampled final is diagnostic only")
+    source_cache = {}
+    coverage = validate_coverage(pairs, findings, vault, source_cache=source_cache)
+    if any(item["severity"] in {"critical", "major"} for item in parse_findings(findings).findings):
+        raise RunError("current final critical/major findings require correction and fresh extraction/results; a resolution log cannot clear them")
+    coverage.update(validate_review(text, inputs["report_revision"], pairs, findings.get("semantic_review"), source_cache))
+    current_corpus = corpus_inputs(vault, manifest["vault_tag"], text, inputs["evidence_requirements"], actual, source_cache)
+    if pairs.get("corpus_inputs") != current_corpus:
+        raise RunError("final corpus inputs are missing or stale; re-extract and review every current corpus member")
+    coverage["evidence_counts"] = validate_corpus_review(pairs, findings["semantic_review"], findings.get("corpus_review"), source_cache)
     return coverage
 
 
@@ -1079,6 +1203,7 @@ def verify_run(vault, vault_tag: str) -> dict:
     profile = resolve_profile(manifest.get("profile", "full"), vault.config_path)
     run_dir = vault.run_dir(vault_tag)
     checks: list[dict] = []
+    evidence_counts = None
 
     def check(name: str, ok: bool, detail: str) -> None:
         checks.append({"name": name, "ok": bool(ok), "detail": detail})
@@ -1216,12 +1341,12 @@ def verify_run(vault, vault_tag: str) -> dict:
             # folding the rules in here removes that seam.
             try:
                 from hyperresearch.cli.lint import (
-                    _check_quote_integrity,
+                    _check_cited_quote_integrity,
                     _check_retracted_citations,
                 )
 
                 for rule, fn in (
-                    ("quote-integrity", _check_quote_integrity),
+                    ("quote-integrity", _check_cited_quote_integrity),
                     ("retracted-citations", _check_retracted_citations),
                 ):
                     errors = [
@@ -1304,7 +1429,9 @@ def verify_run(vault, vault_tag: str) -> dict:
     if current_contract:
         try:
             coverage = _validate_final_audit(vault, manifest)
+            evidence_counts = coverage["evidence_counts"]
             check("finalization", True, f"final {coverage['coverage_mode']} audit: {coverage['reviewed']}/{coverage['selected']} selected; {coverage['unreviewed']} explicitly unreviewed")
+            check("qualified-evidence", True, json.dumps(evidence_counts, sort_keys=True))
         except (ValueError, OSError, UnicodeError, TypeError, KeyError) as exc:
             check("finalization", False, str(exc))
         try:
@@ -1317,6 +1444,8 @@ def verify_run(vault, vault_tag: str) -> dict:
     if inputs_before is not None:
         result["inputs"] = inputs_before
         result["input_digest"] = _digest(inputs_before)
+    if evidence_counts is not None:
+        result["evidence_counts"] = evidence_counts
     return result
 
 

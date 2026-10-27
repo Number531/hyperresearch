@@ -1,12 +1,12 @@
 ---
 name: hyperresearch-cite-checker
 description: >
-  Step 14.5 of the hyperresearch V8 pipeline. Verifies that each sampled
-  citation actually supports its sentence by reading the cited note's body.
+  Initial step 14.5 and final whole-report reviewer in the hyperresearch V8
+  pipeline. Verifies citations by reading each cited original note body.
   Receives selected (sentence, note_id) pairs; mechanical hints are evidence
   candidates only. Returns every selected verdict, including supported,
   with source-body evidence and negative findings the patcher consumes.
-  This is reading comprehension at volume, not prose judgment.
+  Final review covers every report unit and atomic assertion, including uncited text.
   Never edits the report.
 model: sonnet
 tools: Bash, Read, Write
@@ -131,17 +131,185 @@ For each assigned pair:
 ## Final-pass boundary
 
 In `audit_pass: final`, retain every selected result and mandatory dangling
-finding under the separate final paths. The extraction binds the exact final
-report and completed stage/output inputs. A current final critical requires
+finding under the separate final paths. Final extraction defaults to comprehensive:
+every resolvable pair must be selected and reviewed, with zero unreviewed remainder.
+An explicitly sampled final extraction is diagnostic only and cannot approve finish.
+You are the ONE designated whole-report checker: read the complete report,
+verbatim query and decomposition, not just the selected citation sentences.
+Use the existing final findings envelope; do not create another review artifact
+or add model calls. Initial pair sampling remains an early repair diagnostic.
+
+### Whole-report semantic_review version 1
+
+Read `semantic_inventory` in the final pairs file. It inventories every
+nonblank line, including headings, uncited prose, lists, tables, quotations,
+code and text under Sources/References. Each unit retains exact character
+offsets, its contiguous block, active headings and local citation pair IDs.
+No section title makes the following text nonassertive. Read table headers,
+qualifiers, surrounding prose and cited source bodies before atomizing claims.
+
+Add `semantic_review` to the SAME final findings envelope with these fields:
+
+- `schema_version: 1`, `report_revision` copied from extraction,
+  `inventory_digest` copied from `semantic_inventory.inventory_digest`, and
+  `finalization_input_digest` copied from `finalization_inputs.input_digest`.
+- `reviewer: {identity: <declared reviewer>, scope: "whole-report",
+  provenance_note: <how this review was produced and its limits>}`.
+  Declared identity is provenance, not proof of independent execution.
+- `task_fit: {outcome: "satisfactory" | "concern" | "unknown", reason: ...}`:
+  judge whether the complete report answers the actual task and its scope.
+- `method_review`: one scoped `{outcome, reason}` record for EACH dimension:
+  `signs`, `units`, `denominators`, `study_universe`, `horizon`,
+  `api_vs_format`, `measured_vs_reported`, `costs_eligibility_pit`,
+  `method_feasibility`, `counterhypothesis`. Outcomes are `satisfactory`,
+  `not-applicable`, `concern`, or `unknown`. Explain applicability and the
+  actual judgment; never fill the rubric with generic assurances. Account
+  for signs/metric units, sample denominators/universe/horizon, API endpoints
+  versus format support, measured results versus vendor reports, costs,
+  eligibility and point-in-time inputs, feasibility, and counterhypotheses.
+- `units`: EXACTLY one record per inventory unit, in inventory order, with
+  `unit_id`, nonempty `atomization_reason`, `assertions`, and
+  `nonassertive_spans`. Explain why the atomization covers every substantive
+  assertion or why a span is nonassertive; syntactic coverage cannot prove
+  that your semantic atomization is correct.
+
+Every assertion/nonassertive span has `start`, `end`, and `text` copied from
+the decoded report (Unicode character offsets, end exclusive). Spans must
+partition every nonwhitespace character of the unit without overlap. Each
+nonassertive span additionally needs its specific `reason`; a heading or
+bibliography can be classified this way only after reading its content.
+
+Each assertion additionally records:
+
+- `assertion_id`: compute with
+  `hyperresearch.core.semantic_review.assertion_id(report_revision, unit_id, start, end, text)`.
+- `kind`: `empirical`, `derived`, `proposal`, `design-parameter`, or
+  `capture-gap`; `material`: explicit boolean; `disposition`: `supported`,
+  `partially-supported`, `unsupported`, or `unknown`.
+- `presentation`: respectively `evidence-backed`, `derived`, `proposed`,
+  `design-parameter`, or `bounded-capture-gap`. Check the actual report
+  wording: an unsupported factual claim cannot be rescued by relabeling it
+  as a proposal in JSON. Proposals and parameters must be presented as such.
+- Nonempty assertion-specific `reasoning`, `task_fit`, `scope`, and
+  `method_scope`. Add applicable `method_checks` as a dimension-to-
+  `{outcome, reason}` object (empty only with a reasoned method scope).
+- `evidence`: original-body records with `pair_id`, `note_id`,
+  `source_revision`, literal nonempty `source_excerpt`, and assertion-specific
+  `reasoning`. Use ONLY an actual citation pair in this unit's block context,
+  the pair's current DB-mapped original body and its extraction revision.
+  Other notes, frontmatter, global claim rows, shingle/numeric matches and
+  generic passage assurances cannot establish support. Supported or partial
+  empirical assertions require such evidence. Negative unknown/unsupported
+  assertions may have no passage, with an explicit explanation of the gap.
+- `derived` assertions also need `derivation: {source_dependent: <boolean>,
+  premises: <explicit premises>, calculation: <reasoned calculation>}`.
+  Source-dependent derivations need locally cited premise evidence. Pure
+  stipulated arithmetic may be uncited. Proposals, design parameters and
+  capture gaps need a scoped `nonempirical_basis`; a capture gap concerns
+  this bounded capture, not what all literature or reality contains.
+
+All material assertions must be supported; partial, unsupported and unknown
+material judgments block finish. A concern/unknown in whole-report task fit
+or method review, or in a material assertion's applicable method checks,
+also blocks. Bounded original abstracts/introductions and first-party
+descriptions may support only what their actual passages say; they do not
+become independent measurements or universal evidence. Uncited proposals,
+parameters, capture gaps and pure arithmetic are not empirical support.
+
+The gate checks recorded judgment, complete spans and literal source binding;
+it does not determine truth, method adequacy or genuine reviewer independence.
+Whole-report revisions invalidate this review; do not restamp it after changes.
+If pair work was explicitly sharded, exactly ONE designated owner must retain
+the complete semantic_review. The native merge retains that extension and
+rejects duplicate owners; never silently discard it or merge partial unit sets.
+
+### Corpus qualification corpus_review version 1 (same final owner)
+
+Read `corpus_inputs` in the SAME final pairs file. Its exact requirements
+come from the numeric scale gear in manifest.profile, frozen at stage 1;
+resolved_pipeline_tier controls stages, not these numbers. Configured floors
+and optional decomposition evidence_requirements can raise source_min and
+claims_min, never lower frozen floors. Do not substitute a universal quota.
+
+The corpus includes every current-tagged note, including uncited notes, plus
+explicitly cited/reused notes and resolved bibliography entries. Read each
+member's current DB-mapped parsed body. A source/body/metadata/membership or
+requirement change requires fresh extraction and review. Verify never syncs,
+ingests or recomputes independence; a disk/DB drift error requires explicit
+correction outside verification. Do not rewrite old note bodies or claim tags
+to reuse a source. Raw DB claims are informational note_id/claim_hash rows
+within this corpus, including old-run rows; they never establish support.
+
+Add `corpus_review` beside semantic_review in the SAME findings envelope:
+- `schema_version: 1`, `report_revision` copied from the pairs file,
+  `corpus_input_digest` copied from corpus_inputs.input_digest, and
+  `reviewer: {identity, provenance_note}` recording this whole-report owner's
+  declared provenance, without claiming independently proven execution.
+- `qualifications`: exactly one record per corpus_inputs.members entry, in
+  that order, with `note_id`, current `source_revision`, reviewed `work_id`
+  and `mirror_group`, and explicit judgments:
+  `capture_kind` is original-full, original-excerpt, original-abstract,
+  metadata-only, secondary, or unknown; `originality` is original, secondary,
+  or unknown; `relevance` is relevant, not-relevant, or unknown; `substance`
+  is adequate, inadequate, or unknown. Supply a nonempty literal current
+  parsed-body `source_excerpt` and nonempty `reason` addressing identity,
+  originality, task relevance and capture adequacy. An unavailable/empty
+  body instead requires null source_excerpt and an honest nonqualifying
+  judgment. Include `independence: {outcome, scope, reason}`, with outcome
+  independent, first-party, derivative, or unknown and nonempty scoped reasons.
+- `propositions`: exactly one record per semantic_review assertion that is
+  supported empirical, or supported source-dependent derived, and has body
+  evidence, in semantic unit/assertion order. Copy its current `assertion_id`,
+  assign a stable `proposition_key`, and give `evidence_scope` plus a nonempty
+  `reason` for support scope and proposition identity. Scope is
+  original-document, independent-measurement, bounded-abstract, or
+  secondary-attribution. Use the same proposition_key for paraphrases of the
+  same atomic proposition; different keys cannot multiply identical normalized
+  assertion text. Never turn repeated citations into distinct propositions.
+
+Only relevant adequately captured original-full/original-excerpt works meet
+source_min. Adequate original introductions/excerpts may qualify; no complete
+paper/all-tables requirement is added. Metadata/landing stubs, abstracts,
+secondary captures and unknowns do not meet this substantive-original quota.
+The current canonical final report never counts as an external original.
+Work and mirror identities plus deterministic DOI, conservative canonical URL
+and exact normalized parsed-body ties collapse copies even if you assign
+different work IDs. Do not merge unique works merely for shared titles/authors.
+Judge other derivation/paraphrase relationships explicitly; hints are not truth.
+
+An original abstract can support an explicitly bounded abstract-level fact
+under bounded-abstract, and a secondary body can support explicit attribution
+under secondary-attribution. Such eligible facts can meet claims_min while
+their captures do not meet source_min. First-party vendor API documentation
+can qualify as an original document; it cannot supply independent-measurement
+support unless independently measured original evidence actually supports that
+assertion. Scope must match the reviewed source evidence, not the desired quota.
+Every material supported assertion needs eligible local body evidence for its
+scope even when other works/claims already meet both floors. Unknown or
+metadata-only evidence cannot clear material empirical support. Uncited
+proposals, parameters, capture gaps and source-free arithmetic never count as
+supported atomic evidence, even if irrelevant citations are attached.
+
+The gate reports raw notes, citation pairs, raw DB claim rows, qualified unique
+works, independent works and distinct supported atomic units separately.
+Independent works is informational, with no extra universal minimum. One
+designated final owner retains BOTH complete semantic_review and corpus_review;
+native shard merge preserves each and rejects duplicate extension owners.
+Qualification, relevance, independence, atomization and paraphrase judgments
+remain recorded review, not automatically established semantic truth.
+
+The extraction binds the exact final report and completed stage/output inputs.
+A current final critical or major finding or blocking semantic judgment requires
 real report/source correction, fresh extraction and reviewed results. A
 same-revision resolution log cannot clear it. Do not restamp inputs or rewrite
 initial evidence. Report changes require renewed final-edit work before a new
-final extraction. Sampled weak remainder stays explicitly unreviewed.
+final extraction. Quoted body passages must occur literally in the original
+body of a locally cited source, not merely somewhere else in the vault.
 
 ## Resolution-review mode (initial pass only, after patch application)
 
 Read the original findings and the CURRENT patched report. Reread the
-relevant cited note bodies for every critical finding. Judge the actual
+relevant cited note bodies for every critical and major finding. Judge the actual
 remaining claim and citation, not the patcher's `applied` entry. A changed
 claim must now be supported; a removed claim must actually be absent.
 If the finding remains unresolved, record that and report a blocker.
@@ -155,7 +323,7 @@ The shared native API is `hyperresearch.core.citation_contracts.report_revision`
 The original findings revision can differ from this post-patch revision.
 
 Write exactly one resolution record per reviewed finding and cover every
-critical. Each record has `finding_id`, `status` (`resolved` or `unresolved`),
+critical and major finding. Each record has `finding_id`, `status` (`resolved` or `unresolved`),
 `review_verdict` (`supported`, `claim-removed`, or `unresolved`), and a
 nonempty `evidence` explanation of the reread report/source. Only the first
 two review verdicts permit `status: resolved`. Unknown/duplicate identities,

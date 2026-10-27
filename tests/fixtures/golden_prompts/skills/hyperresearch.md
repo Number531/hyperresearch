@@ -64,6 +64,11 @@ When you invoke a Skill, that skill's full procedure is loaded into your context
 
 Step 1 classifies the query into a `pipeline_tier` (`light` / `full`). The tier is written to `research/runs/<vault_tag>/prompt-decomposition.json`. After step 1, **read that file** to learn the tier, then sequence steps according to:
 
+Resolve any reclassification before marking stage 1 done. That completion freezes
+`resolved_pipeline_tier` and `resolved_profile_steps` in the manifest. Later edits
+to the decomposition cannot downgrade or replace this run's route; use a new run
+for a different route. The initialized profile still supplies the scale gear.
+
 | Tier | Steps that run | Typical time |
 |------|---|---|
 | `light` | 1 → 2 → 10 (single draft) → 15 → 16 → final citation audit → finish | ~30–40 min |
@@ -77,6 +82,14 @@ Step 1 classifies the query into a `pipeline_tier` (`light` / `full`). The tier 
 **Scale gear (tier ≠ gear).** The numbers rendered into the step skills — source targets, loci caps, depth budgets, word targets — come from the installed scale profile, the **gear** (currently `full`). The `full` tier row above already reflects it. Two gears ship: `full` (55–80 sources, ~1.5–2.5 hours) and `premier` (100–130 sources, double depth budget, ~3–5 hours). The user switches gears with `hyperresearch profile use <full|premier>` — that re-renders the installed skills, so it takes effect on the NEXT run, never mid-run. `light` and `dissertation` are tiers, not gears: light is auto-classified per query; dissertation is opt-in per run and loops each chapter inside the gear's envelope.
 
 ---
+
+Numeric acceptance uses the run's `manifest.profile` scale gear. Stage 1 done
+freezes `resolved_evidence_requirements: {gear, source_min, claims_min}` while
+the separately resolved pipeline tier freezes the stage route. Optional
+`evidence_requirements` in decomposition records only explicit numeric user
+floors, as nonnegative integers; it can raise but never lower configured gear
+floors. Later raises require fresh review; changing the frozen gear is refused.
+Read these resolved requirements rather than inferring a quota from tier names.
 
 ## Bootstrap (run BEFORE invoking step 1)
 
@@ -213,7 +226,7 @@ If you're ever uncertain what to do next, the answer is: re-read this file and f
 All tiers, including light, receive a separate final citation audit after all edits.
 Keep the initial `cite-check-*` artifacts from step 14.5 unchanged. For full,
 premier and dissertation, step 14.5's completion records its then-current
-coverage and reviewed critical resolutions. That historical snapshot survives
+coverage and reviewed critical/major resolutions. That historical snapshot survives
 legitimate polish; it is not approval of the final report.
 
 1. Ensure required stages are recorded **done**, with their real outputs.
@@ -235,13 +248,31 @@ legitimate polish; it is not approval of the final report.
    ```
    This refuses incomplete/stale stages and writes
    `research/runs/<vault_tag>/final-cite-check-pairs.json`. Spawn the same
-   cite-checker against those final selected pairs, with `audit_pass: final`,
-   and retain every selected supported/negative result plus body evidence in
-   `final-cite-check-findings.json`. Shards retain separate final-prefixed
-   paths and merge without dropping any result. Sampled coverage may retain
-   its declared weak remainder; call it unreviewed. Use
-   `--coverage-mode comprehensive` only when every pair will be reviewed.
-4. Any current final **critical** finding requires a real report/source
+   cite-checker as ONE designated whole-report owner, with `audit_pass: final`,
+   the complete report, query/decomposition and every pair. Final extraction
+   defaults to comprehensive; sampled final is diagnostic and cannot finish.
+   Retain every supported/negative pair result plus local original-body
+   evidence and the versioned `semantic_review` and `corpus_review` extensions in
+   `final-cite-check-findings.json`. Review every inventory unit, including
+   uncited prose/tables/lists/quotes and reference-section tails, with exact
+   atomic assertion or reasoned nonassertive span coverage. Record scoped
+   task-fit/method judgments, materiality and explicit dispositions. Empirical
+   support requires locally cited current original-body passages; clearly
+   labeled proposals/parameters/bounded gaps and pure arithmetic may be
+   uncited with a reasoned basis. Source-dependent calculations need cited
+   premises. Pair shards, when explicitly used, preserve one complete review
+   owner and every result; they cannot silently discard extension fields.
+   The same owner qualifies every `corpus_inputs.members` entry, including
+   relevant uncited tagged originals and explicitly reused bibliography notes.
+   Record current work/mirror identity, capture adequacy/relevance and scoped
+   independence, plus assertion-to-proposition mappings. Adequate original
+   excerpts can meet the source floor; abstracts and metadata cannot.
+   Bounded abstract facts and explicit secondary attribution may support
+   atomic units under their limited scope. Vendor documentation does not
+   establish independent measured benchmarks. Repeated citations, mirrored
+   works and repeated atomic propositions cannot inflate either floor.
+4. Any current final **critical or major** finding, non-supported material
+   assertion, or blocking task/method judgment requires a real report/source
    correction followed by fresh extraction and reviewed results. A same-byte
    resolution log cannot clear it. If the report changed, rerun the affected
    final-edit work (at least step 16 running/done) before extracting again.
@@ -254,12 +285,23 @@ legitimate polish; it is not approval of the final report.
 
 `run finish` checks report structure/length/citation density, existing blocking
 content lints, required stage flags and output shapes, initial review history,
-and exact final citation extraction/selected coverage against current source
-bodies. Its existing manifest receipt binds the report, stages, outputs,
+and comprehensive final citation plus whole-report recorded review against
+current locally cited source bodies, and separate qualified-original-work and
+supported-atomic-unit floors from the frozen numeric gear requirements.
+Raw notes, pairs, DB claim rows, qualified works, independent works and supported
+atomic units remain separate counts; independence adds no universal quota.
+Corpus bodies, metadata and membership are freshly checked even for uncited
+notes; disk/DB drift blocks instead of triggering automatic synchronization.
+Quoted body passages cannot borrow an
+unrelated note's text. Its existing manifest receipt binds the report, stages, outputs,
 profile/config and blocking lint outcomes. Mutations during verification or
 persistence reject approval. `run status`/`run resume` identify stale approvals;
 a current session's Stop hook cannot treat numbered flags alone as finish.
-Legacy manifests remain read-only diagnostics, never current approval.
+Fresh runs use finalization version 2. Version-1 and unversioned manifests remain
+read-only diagnostics, never current approval; do not migrate or re-finish them.
+Step, event, spend and status mutations are refused for these old contracts.
+These gates validate the recorded evidence contract, not semantic truth or
+proof of independent producer work.
 
 **The gate's verdict is binding.** Correct the named report, source or stage
 work, regenerate the final audit for changed inputs, and rerun finish. For a

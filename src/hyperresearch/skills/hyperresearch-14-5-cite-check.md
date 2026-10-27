@@ -91,15 +91,15 @@ Use the validated merged envelope from 14.5.2, with each dangling finding alread
 {"schema_version": 1, "findings_report_revision": "<copy original findings revision>", "reviewed_report_revision": null, "resolutions": [], "total_findings": 0, "applied": [], "skipped": [], "conflicts": [], "orchestrator_escalated": []}
 ```
 
-Fix repertoire (in the findings' `suggested_fix`): swap to `correct_note_id`, soften the claim to what the source supports, or delete the sentence when nothing supports it. Same rules as step 14: surgical hunks, zero regeneration, `critical` findings must not be silently skipped.
+Fix repertoire (in the findings' `suggested_fix`): swap to `correct_note_id`, soften the claim to what the source supports, or delete the sentence when nothing supports it. Same rules as step 14: surgical hunks, zero regeneration, `critical` and `major` findings must not be silently skipped.
 
-The patcher records each `finding_id` in the application entries and preserves the revision fields. Applying or escalating a patch does not resolve a critical finding. The initial null review revision is intentionally unverified.
+The patcher records each `finding_id` in the application entries and preserves the revision fields. Applying or escalating a patch does not resolve a critical or major finding. The initial null review revision is intentionally unverified.
 
 **Skip the pass entirely** when the merged envelope's `findings` is `[]`.
 
-## Step 14.5.4 — Review critical resolutions
+## Step 14.5.4 — Review critical and major resolutions
 
-If any critical findings exist, spawn the `hyperresearch-cite-checker` again with `mode: resolution-review`, the original `pairs_file`, `findings_input_path: research/runs/<vault_tag>/cite-check-findings.json`, `draft_path: research/notes/final_report_<vault_tag>.md`, and the existing `patch_log_path: research/runs/<vault_tag>/cite-check-patch-log.json`. Wait for it to reread the patched report and relevant source bodies. It must preserve application data and populate:
+If any critical or major findings exist, spawn the `hyperresearch-cite-checker` again with `mode: resolution-review`, the original `pairs_file`, `findings_input_path: research/runs/<vault_tag>/cite-check-findings.json`, `draft_path: research/notes/final_report_<vault_tag>.md`, and the existing `patch_log_path: research/runs/<vault_tag>/cite-check-patch-log.json`. Wait for it to reread the patched report and relevant source bodies. It must preserve application data and populate:
 
 ```json
 {
@@ -112,10 +112,10 @@ If any critical findings exist, spawn the `hyperresearch-cite-checker` again wit
 }
 ```
 
-`claim-removed` is also a successful review verdict when the claim was actually removed. Otherwise use `status: "unresolved"`, `review_verdict: "unresolved"`, explain the blocker, and fix/review again before marking the step done. Every critical needs exactly one successful resolution; records for other known findings are permitted. Unknown or duplicate IDs, stale original/reviewed revisions, and `applied` entries alone fail the native gate. Use the checker's byte-hash procedure; the shared native identity API lives in `hyperresearch.core.citation_contracts`.
+`claim-removed` is also a successful review verdict when the claim was actually removed. Otherwise use `status: "unresolved"`, `review_verdict: "unresolved"`, explain the blocker, and fix/review again before marking the step done. Every critical and major finding needs exactly one successful resolution; records for other known findings are permitted. Unknown or duplicate IDs, stale original/reviewed revisions, and `applied` entries alone fail the native gate. Use the checker's byte-hash procedure; the shared native identity API lives in `hyperresearch.core.citation_contracts`.
 
 **Complete the initial review now:** `run step <vault_tag> 14.5 --status done -j`
-validates coverage, source bytes and critical resolution against the then-current
+validates coverage, source bytes and critical/major resolution against the then-current
 report and records bounded hashes in that existing step entry. Preserve these
 initial artifacts afterward. Later polish/readability edits receive a separate
 final audit; do not restamp the initial resolution log for later report bytes.
@@ -129,7 +129,7 @@ Do not rewrite legacy findings or patch logs merely to make verification pass. B
 - `research/runs/<vault_tag>/cite-check-pairs.json` exists
 - `research/runs/<vault_tag>/cite-check-findings.json` is a valid versioned envelope bound to the original pairs revision, with every selected result and all mandatory dangling findings
 - Native `validate_coverage` passes: exact selected IDs/results, declared sampled remainder or zero comprehensive remainder, and fresh source-body inputs
-- If any critical findings exist: `cite-check-patch-log.json` contains matching explicit successful resolution reviews bound to the current post-patch report bytes
+- If any critical or major findings exist: `cite-check-patch-log.json` contains matching explicit successful resolution reviews bound to the current post-patch report bytes
 - Manifest: `{hpr_path} run step <vault_tag> 14.5 --status done -j`
 
 ## Next step
@@ -142,26 +142,77 @@ Return to the entry skill and invoke `<% if platform == "codex" %>cat .hyperrese
 This is the existing citation procedure with separate final-pass paths, not an
 additional initial review group for light. Mark all required stages done with
 real outputs; step 16's completion must match the exact current report bytes.
-Run `{hpr_path} citecheck extract <vault_tag> --final -j`. Preserve the declared
-sampling mode/remainder. The extraction binds the stable stage/output inputs,
-including initial evidence hashes, and every actual report citation occurrence.
+Run `{hpr_path} citecheck extract <vault_tag> --final -j`. Final extraction
+defaults to comprehensive coverage: review every citation pair with zero
+unreviewed remainder. Explicit `--coverage-mode sampled` is diagnostic only
+and cannot approve finish, even if its selected results are all supported.
+The extraction binds stable stage/output inputs, including initial evidence
+hashes, every actual citation occurrence and the complete `semantic_inventory`.
+It inventories every nonblank report unit with exact spans and block/heading
+context, including uncited prose, tables, lists, quotations and content after
+Sources/References. A heading cannot hide an assertion from review.
 
 Repeat extraction and findings-mode checker work above using:
 - `pairs_file: research/runs/<vault_tag>/final-cite-check-pairs.json`
 - `findings_path: research/runs/<vault_tag>/final-cite-check-findings.json`
 - `audit_pass: final`, `mode: findings`
 
-For parallel checkers use `final-cite-check-findings-a.json` / `-b.json` and
-retain/merge every selected ID, verdict and evidence record. Append every
-dangling occurrence exactly once as a critical finding. Final selected/body
-coverage obeys the same strict versioned contract as initial review.
+Use ONE designated existing cite-checker for the entire final report, with
+the verbatim query, decomposition and all final pairs. Follow the agent's
+**Whole-report semantic_review version 1** contract. Keep its complete
+`semantic_review` extension inside `final-cite-check-findings.json`: exact
+revision/inventory/task digests, declared reviewer provenance, global task-fit
+and method rubric, and one explicit unit review per inventory unit. Atomic
+assertions and reasoned nonassertive spans must partition every unit's text.
+Require assertion-specific dispositions, scope, task/method reasoning and
+literal current original-body passages bound to local report citations.
 
-A current final critical cannot be cleared by a same-revision resolution log.
+The same existing owner also follows **Corpus qualification corpus_review
+version 1** and retains `corpus_review` beside semantic_review in that envelope.
+Read the final pairs' `corpus_inputs`: every current-tagged member, including
+uncited notes, explicitly reused citations and resolved bibliography entries,
+current source/metadata/identity snapshots, informational raw claim rows and
+the exact frozen numeric gear requirements. Supply one qualification per
+member and current assertion_id-to-proposition_key mappings with evidence
+scope. Relevant adequate original excerpts can qualify; abstracts, metadata
+and secondary captures cannot meet the substantive-original source quota.
+Abstract-level facts and explicit secondary attribution may meet supported
+atomic minima under their bounded scope. API documentation is not independent
+measurement. Unknown/metadata-only support cannot clear any material empirical
+assertion merely because other evidence meets the totals. Repeated citations
+or paraphrases do not create new propositions; DOI/URL/body mirror ties cannot
+be overridden with different work IDs. Independent-work counts are separate
+and impose no additional minimum. No new checker or artifact is added.
+
+Empirical facts need cited evidence; partial, unsupported or unknown material
+assertions block. Clearly presented proposals, design parameters, pure
+stipulated arithmetic and bounded capture gaps may be uncited with explicit
+classification/basis; they do not become empirical support. Source-dependent
+derivations require cited premises. Check signs, units, denominators,
+universe/horizon, API-versus-format claims, measured-versus-reported results,
+costs/eligibility/point-in-time inputs, feasibility and counterhypotheses.
+Record applicable method judgments rather than generic assurances.
+
+Append every dangling occurrence exactly once as a critical finding. If pair
+work was explicitly sharded, exactly ONE designated owner must supply the
+complete semantic_review and corpus_review; native shard merging preserves both and rejects
+duplicate owners. Never discard extensions or merge incomplete unit reviews.
+
+A current final critical or major finding cannot be cleared by a same-revision resolution log.
 Correct the report/source, reenter final editing when report bytes change
 (`run step <vault_tag> 16 --status running`, perform the affected review/edits,
 then `--status done`), extract again and review the fresh selected pairs.
 If application notes are needed, use `final-cite-check-patch-log.json`; preserve
 initial `cite-check-*` files. Never restamp final inputs or erase a finding to
 make the gate green. Run `{hpr_path} run finish <vault_tag> -j` after final
-coverage is complete and no current critical remains. This validates recorded
-coverage/literal passages, not semantic truth or producer independence.
+coverage and whole-report review are complete and no current critical/major
+finding or blocking semantic judgment remains. Report/source/context changes
+invalidate the review, including uncited corpus membership/body/metadata and
+evidence-requirement changes. Verification and approval never sync, ingest or
+rescore the database; a drift error requires explicit repair and fresh review.
+Old-note claims retain their original run tags and remain informational.
+Quoted body text must occur in a locally cited original
+body; an unrelated vault note cannot clear it. These checks validate recorded
+judgment, coverage and literal passages, not semantic truth, correct
+atomization or producer independence. Legacy/unknown policy runs refuse
+extraction before database synchronization and remain read-only diagnostics.

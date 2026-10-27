@@ -208,6 +208,31 @@ def test_known_noncritical_resolution_is_allowed(citation_artifacts):
     validate_resolutions(parse_findings(findings), log, current)
 
 
+@pytest.mark.parametrize("mutation", ["no-records", "unreviewed", "unresolved", "failed-review", "missing-evidence"])
+def test_major_findings_require_successful_reviewed_resolution(citation_artifacts, mutation):
+    _, findings, log, current = citation_artifacts
+    findings["findings"][0]["severity"] = "major"
+    if mutation == "no-records":
+        log["resolutions"] = []
+    elif mutation == "unreviewed":
+        log.update({"resolutions": [], "reviewed_report_revision": None})
+    elif mutation == "unresolved":
+        log["resolutions"][0].update({"status": "unresolved", "review_verdict": "unresolved"})
+    elif mutation == "failed-review":
+        log["resolutions"][0]["review_verdict"] = "unresolved"
+    else:
+        log["resolutions"][0]["evidence"] = ""
+    with pytest.raises(CitationContractError):
+        validate_resolutions(parse_findings(findings), log, current)
+
+
+def test_minor_only_application_stub_remains_diagnostic(citation_artifacts):
+    _, findings, log, current = citation_artifacts
+    findings["findings"][0]["severity"] = "minor"
+    log.update({"resolutions": [], "reviewed_report_revision": None})
+    validate_resolutions(parse_findings(findings), log, current)
+
+
 def test_every_critical_needs_its_own_review(citation_artifacts):
     pairs, findings, log, current = citation_artifacts
     second_pair = copy.deepcopy(pairs["pairs"][0])
@@ -544,6 +569,21 @@ def test_shards_preserve_supported_results_ids_and_evidence(coverage_artifacts):
         merge_findings_shards(pairs, [*shards, shards[0]], vault)
     with pytest.raises(CitationContractError):
         merge_findings_shards(pairs, shards[:-1], vault)
+
+
+@pytest.mark.parametrize("extension", ["semantic_review", "corpus_review"])
+def test_shard_merge_preserves_one_complete_semantic_review_owner(coverage_artifacts, extension):
+    vault, pairs, findings = coverage_artifacts
+    first, second = copy.deepcopy(findings), copy.deepcopy(findings)
+    first["selected_pair_ids"], first["results"] = findings["selected_pair_ids"][:1], findings["results"][:1]
+    second["selected_pair_ids"], second["results"] = findings["selected_pair_ids"][1:], findings["results"][1:]
+    first[extension] = {"schema_version": 1, "reviewer": {"identity": "designated-whole-report-owner"},
+                                "units": [{"unit_id": "preserve-this-exact-review"}]}
+    merged = merge_findings_shards(pairs, [first, second], vault)
+    assert merged[extension] == first[extension]
+    second[extension] = copy.deepcopy(first[extension])
+    with pytest.raises(CitationContractError, match="exactly one"):
+        merge_findings_shards(pairs, [first, second], vault)
 
 
 @pytest.mark.parametrize("title,body", [

@@ -53,6 +53,88 @@ class TestRunInit:
         assert "2" not in beta["steps"]
         assert len(list_runs(tmp_vault)) == 2
 
+    def test_decomposition_tier_is_frozen_only_when_stage_one_completes(self, tmp_vault):
+        tag = "early-classification"
+        init_run(tmp_vault, tag, profile="premier")
+        path = tmp_vault.run_dir(tag) / "prompt-decomposition.json"
+        path.write_text('{"pipeline_tier": "full"}')
+        set_step(tmp_vault, tag, "1", "running")
+        assert "resolved_pipeline_tier" not in load_manifest(tmp_vault, tag)
+        path.write_text('{"pipeline_tier": "light"}')
+        manifest = set_step(tmp_vault, tag, "1", "done")
+        assert manifest["resolved_pipeline_tier"] == "light"
+        assert manifest["resolved_profile_steps"] == ["1", "2", "10", "15", "16"]
+        set_step(tmp_vault, tag, "1", "running")
+        path.write_text('{"pipeline_tier": "full"}')
+        with pytest.raises(RunError, match="tier"):
+            set_step(tmp_vault, tag, "1", "done")
+        assert load_manifest(tmp_vault, tag)["resolved_pipeline_tier"] == "light"
+
+
+class TestLegacyMutationBoundary:
+    @staticmethod
+    def _legacy_fixture(vault, version):
+        tag = "legacy-mutation"
+        manifest = init_run(vault, tag, profile="light")
+        set_step(vault, tag, "1", "running")
+        if version is None:
+            manifest.pop("finalization_version")
+        else:
+            manifest["finalization_version"] = version
+        manifest["verify"] = {"at": "historical", "passed": True, "original": "preserve"}
+        (vault.run_dir(tag) / "run.json").write_text(json.dumps(manifest))
+        (vault.notes_dir / f"final_report_{tag}.md").write_text("Synthetic historical report.\n")
+        vault.close()
+        return tag
+
+    @staticmethod
+    def _snapshot(vault):
+        return {str(path.relative_to(vault.root)): path.read_bytes() for path in vault.root.rglob("*") if path.is_file()}
+
+    @pytest.mark.parametrize("version", [None, 1])
+    @pytest.mark.parametrize("operation", ["step", "event", "spend", "status"])
+    def test_noncurrent_mutator_api_rejects_without_writing(self, tmp_vault, version, operation):
+        tag = self._legacy_fixture(tmp_vault, version)
+        before = self._snapshot(tmp_vault)
+        with pytest.raises(RunError, match="read-only"):
+            if operation == "step":
+                set_step(tmp_vault, tag, "2", "done")
+            elif operation == "event":
+                runs_mod.record_event(tmp_vault, tag, {"type": "chapter-plan", "chapter": "ch1", "title": "Changed"})
+            elif operation == "spend":
+                add_spend(tmp_vault, tag, estimated_usd=1)
+            else:
+                runs_mod.set_status(tmp_vault, tag, "done")
+        assert self._snapshot(tmp_vault) == before
+        assert init_run(tmp_vault, tag, profile="full")["profile"] == "light"
+        assert self._snapshot(tmp_vault) == before
+
+    @pytest.mark.parametrize("version", [None, 1])
+    @pytest.mark.parametrize("operation", ["step", "event", "spend", "abort", "block"])
+    def test_noncurrent_mutator_cli_rejects_without_writing(self, tmp_vault, monkeypatch, version, operation):
+        from typer.testing import CliRunner
+
+        from hyperresearch.cli import app
+        from hyperresearch.core.vault import Vault
+
+        tag = self._legacy_fixture(tmp_vault, version)
+        before = self._snapshot(tmp_vault)
+        calls = []
+
+        def reject_database_access(vault):
+            calls.append(vault.root)
+            raise AssertionError("legacy mutation refusal must not open or migrate the database")
+
+        monkeypatch.setattr(Vault, "db", property(reject_database_access))
+        arguments = {"step": ["2", "--status", "done"], "event": ["--type", "fetch-wave"],
+                     "spend": ["--usd", "1"], "abort": [], "block": ["--on", "test"]}
+        monkeypatch.chdir(tmp_vault.root)
+        result = CliRunner().invoke(app, ["run", operation, tag, *arguments[operation], "--json"])
+        assert result.exit_code == 1, result.stdout
+        assert "read-only" in result.stdout
+        assert calls == []
+        assert self._snapshot(tmp_vault) == before
+
 
 class TestStepsAndResume:
     def test_step_transitions_and_resume(self, tmp_vault):
@@ -279,9 +361,13 @@ class TestChapterRegistration:
         for cid, title in chapters:
             record_event(vault, tag, {"type": "chapter-plan", "chapter": cid, "title": title})
         registered = load_manifest(vault, tag)["chapters"]
+        (vault.run_dir(tag) / "prompt-decomposition.json").write_text(json.dumps({
+            "pipeline_tier": "dissertation", "sub_questions": [entry["title"] for entry in registered.values()]
+        }), encoding="utf-8")
         (vault.run_dir(tag) / "chapter-plan.json").write_text(json.dumps({"chapters": [
-            {"id": cid, "title": entry["title"], "atomic_items": [], "depends_on": []}
-            for cid, entry in registered.items()
+            {"id": cid, "title": entry["title"], "atomic_items": [entry["title"]],
+             "atomic_item_refs": [f"/sub_questions/{index}"], "depends_on": []}
+            for index, (cid, entry) in enumerate(registered.items())
         ]}), encoding="utf-8")
 
     def test_chapter_plan_event_registers_chapter(self, tmp_vault):
@@ -340,9 +426,13 @@ class TestChapterRegistration:
                 "--data", json.dumps({"chapter": cid, "title": f"Chapter {cid}"}), "--json",
             ])
             assert r.exit_code == 0, r.stdout
+        (tmp_vault.run_dir("ch-cli-000001") / "prompt-decomposition.json").write_text(json.dumps({
+            "pipeline_tier": "dissertation", "sub_questions": [f"Chapter {cid}" for cid in ("ch1", "ch2", "ch3")]
+        }), encoding="utf-8")
         (tmp_vault.run_dir("ch-cli-000001") / "chapter-plan.json").write_text(json.dumps({"chapters": [
-            {"id": cid, "title": f"Chapter {cid}", "atomic_items": [], "depends_on": []}
-            for cid in ("ch1", "ch2", "ch3")
+            {"id": cid, "title": f"Chapter {cid}", "atomic_items": [f"Chapter {cid}"],
+             "atomic_item_refs": [f"/sub_questions/{index}"], "depends_on": []}
+            for index, cid in enumerate(("ch1", "ch2", "ch3"))
         ]}), encoding="utf-8")
         runner.invoke(app, ["run", "step", "ch-cli-000001", "1.5", "--status", "done", "--json"])
 

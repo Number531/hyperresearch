@@ -288,12 +288,29 @@ prompt: |
 
 ## Source count targets
 
+The table guides acquisition. Final acceptance reads the stage-1 frozen
+`resolved_evidence_requirements` for the run's numeric scale gear, including
+configured floors and explicit user raises, independently of the stage tier.
+Collect relevant original works with adequate body captures, not merely raw
+note counts. In the existing final checker, `corpus_review` qualifies tagged
+uncited originals as well as cited/reused members; DOI, conservative URL and
+exact normalized-body ties prevent mirror inflation. An adequate original
+excerpt can qualify without a full paper; metadata/landing stubs, abstracts,
+secondary captures and unknowns cannot meet the substantive-original floor.
+First-party API docs can be original documents without being independent
+measurements. Keep raw notes and qualified unique works distinct. Final
+verification discovers current disk membership read-only and blocks on
+unsynced identity/tag metadata drift; it never syncs or rescales the corpus.
+
 | Tier | Minimum sources | Target sources | Fetchers per wave | Waves |
 |------|----------------|---------------|-------------------|-------|
 | `light` | << light.source_min >> | << light.source_target|dash >> | << light.wave1_fetchers|dash >> | << light.waves|dash >> |
 | `full` | << p.source_min >> | << p.source_target|dash >> | << p.wave1_fetchers|dash >> | << p.waves|dash >> |
 
-Substantive (non-deprecated) note counts. The `full` row reflects the installed scale gear. Quality over quantity — beyond ~<< p.source_target[1] >> sources, each additional source yields diminishing returns while degrading summarizer quality.
+These are acquisition planning targets; final quotas use reviewed unique
+original works from the resolved requirements. The `full` row reflects the
+installed scale gear. Quality over quantity: beyond ~<< p.source_target[1] >> sources, each additional source
+yields diminishing returns while degrading summarizer quality.
 
 ---
 
@@ -338,7 +355,10 @@ prompt: |
 - `research/runs/<vault_tag>/temp/coverage-gaps.md` written
 - (For std/full): `research/runs/<vault_tag>/temp/redundancy-audit.md` written if any claim files existed
 
-If you fall short after two waves, proceed anyway but ensure `coverage-gaps.md` lists what's missing so the drafter handles it.
+If you fall short after two waves, continue downstream with honest gaps in
+`coverage-gaps.md`; this does not waive final evidence floors. The final
+checker must qualify sufficient actual works and supported propositions
+before finish can pass. Do not fabricate qualifications or lower requirements.
 
 ---
 
