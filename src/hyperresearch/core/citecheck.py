@@ -225,15 +225,25 @@ def sample_needs_llm(pairs: list[dict], sample_rate: float = 0.6) -> list[dict]:
 
 
 def write_pairs_file(
-    vault, vault_tag: str, report_path, sample_rate: float = 0.6, *, coverage_mode: str = "sampled",
+    vault, vault_tag: str, report_path, sample_rate: float = 0.6, *, coverage_mode: str = "sampled", final: bool = False,
 ) -> dict:
     """Extract + triage + sample; write cite-check-pairs.json into the run dir."""
+    from hyperresearch.core.citation_contracts import CitationContractError
+    from hyperresearch.core.runs import RunError, finalization_inputs
+
+    final_inputs = None
+    if final:
+        if report_path.resolve() != (vault.notes_dir / f"final_report_{vault_tag}.md").resolve():
+            raise CitationContractError("final audit must use the canonical final report")
+        try:
+            final_inputs = finalization_inputs(vault, vault_tag)
+        except (RunError, OSError, UnicodeError, ValueError) as exc:
+            raise CitationContractError(str(exc)) from exc
     report_bytes = report_path.read_bytes()
     revision = report_revision(report_bytes)
     report_text = report_bytes.decode("utf-8-sig")
     pairs = extract_pairs(report_text, vault.db, revision=revision)
     triaged = triage_pairs(pairs, vault.db)
-    from hyperresearch.core.citation_contracts import CitationContractError
 
     if coverage_mode not in {"sampled", "comprehensive"}:
         raise CitationContractError("coverage_mode must be sampled or comprehensive")
@@ -263,7 +273,12 @@ def write_pairs_file(
         "sampled_for_llm": to_check,
         "dangling": [p for p in triaged["pairs"] if p["verdict"] == "dangling"],
     }
-    (run_dir / "cite-check-pairs.json").write_text(
+    if final:
+        if revision != final_inputs["report_revision"] or final_inputs != finalization_inputs(vault, vault_tag):
+            raise CitationContractError("inputs changed during final extraction")
+        out["finalization_inputs"] = final_inputs
+    filename = "final-cite-check-pairs.json" if final else "cite-check-pairs.json"
+    (run_dir / filename).write_text(
         json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     return out

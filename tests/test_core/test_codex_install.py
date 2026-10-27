@@ -529,7 +529,7 @@ def test_stop_gate_follows_declared_light_tier(tmp_vault):
     assert "gate-run is at step 10 (hyperresearch-10-triple-draft)" in decision["reason"]
 
 
-@pytest.mark.parametrize("status", ["done", "aborted", "failed", "paused", "blocked"])
+@pytest.mark.parametrize("status", ["aborted", "failed", "paused", "blocked"])
 def test_stop_gate_silent_for_inactive_runs(tmp_vault, status):
     from hyperresearch.core.runs import init_run, set_status
 
@@ -538,13 +538,14 @@ def test_stop_gate_silent_for_inactive_runs(tmp_vault, status):
     assert codex.stop_gate_decision(tmp_vault, session_id="session-a") is None
 
 
-def test_stop_gate_silent_when_all_steps_done(tmp_vault):
-    from hyperresearch.core.runs import init_run, load_manifest, set_step
+def test_stop_gate_does_not_accept_flags_as_finish(tmp_vault):
+    from hyperresearch.core.runs import init_run, load_manifest, manifest_path
 
     init_run(tmp_vault, "gate-run", profile="light", session_id="session-a")
-    for step in load_manifest(tmp_vault, "gate-run")["profile_steps"]:
-        set_step(tmp_vault, "gate-run", step, "done")
-    assert codex.stop_gate_decision(tmp_vault, session_id="session-a") is None
+    manifest = load_manifest(tmp_vault, "gate-run")
+    manifest["steps"] = {step: {"status": "done"} for step in manifest["profile_steps"]}
+    manifest_path(tmp_vault, "gate-run").write_text(json.dumps(manifest), encoding="utf-8")
+    assert codex.stop_gate_decision(tmp_vault, session_id="session-a")["decision"] == "block"
 
 
 def test_stop_gate_silent_for_stale_run(tmp_vault):

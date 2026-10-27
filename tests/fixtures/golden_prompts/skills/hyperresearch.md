@@ -66,9 +66,9 @@ Step 1 classifies the query into a `pipeline_tier` (`light` / `full`). The tier 
 
 | Tier | Steps that run | Typical time |
 |------|---|---|
-| `light` | 1 → 2 → 10 (single draft) → 15 → 16 | ~30–40 min |
-| `full` | 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 14.5 → 15 → 16 | ~1.5–2.5 hours |
-| `dissertation` | 1 → 1.5 (chapter partition) → [2 → … → 10 per chapter] → 6g/11 (global) → 12 → 13 → 14 → 14.5 → 15 → 16 | ~4–8 hours |
+| `light` | 1 → 2 → 10 (single draft) → 15 → 16 → final citation audit → finish | ~30–40 min |
+| `full` | 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 14.5 → 15 → 16 → final citation audit → finish | ~1.5–2.5 hours |
+| `dissertation` | 1 → 1.5 (chapter partition) → [2 → … → 10 per chapter] → 6 (global) → 11 → 12 → 13 → 14 → 14.5 → 15 → 16 → final citation audit → finish | ~4–8 hours |
 
 `dissertation` is opt-in only — the user must explicitly request it (or the run was initialized with `--profile dissertation`). Step 1 never auto-classifies into it. **It is experimental.** Its length, read-budget and citation targets are configured but nothing reads them yet (#103). Say so to the user before starting one. On dissertation runs, steps 2–10 loop per chapter (see `hyperresearch-1-5-chapter-partition`), with up to 2 chapters in flight; each chapter stays within the proven 40–80-source envelope while the run totals 300–450 sources.
 
@@ -201,7 +201,7 @@ Context compaction may eat parts of this conversation. If you're unsure what ste
    - Step 14: `research/runs/<vault_tag>/patch-log.json` (and edited final_report.md)
    - Step 15: `research/runs/<vault_tag>/polish-log.json` (and edited final_report.md)
    - Step 16: `research/runs/<vault_tag>/readability-recommendations.json`, `research/runs/<vault_tag>/readability-decisions.json` (and edited final_report.md)
-3. **Find the highest-numbered step whose artifact exists.** Resume from the next step.
+3. **Use the manifest resume action.** After numbered stages, it names a real final-audit or finish command. Artifact existence alone cannot establish completion; legacy artifact scans are diagnostic only.
 4. **Re-invoke this entry skill** if you've lost track entirely: `Skill(skill: "hyperresearch")`. It loads fresh.
 
 If you're ever uncertain what to do next, the answer is: re-read this file and find the next step in the tier sequence.
@@ -210,39 +210,69 @@ If you're ever uncertain what to do next, the answer is: re-read this file and f
 
 ## Final integrity gate (after step 16)
 
-Once step 16 returns, run the integrity check:
+All tiers, including light, receive a separate final citation audit after all edits.
+Keep the initial `cite-check-*` artifacts from step 14.5 unchanged. For full,
+premier and dissertation, step 14.5's completion records its then-current
+coverage and reviewed critical resolutions. That historical snapshot survives
+legitimate polish; it is not approval of the final report.
 
-```bash
-for f in research/runs/<vault_tag>/critic-findings-dialectic.json \
-         research/runs/<vault_tag>/critic-findings-depth.json \
-         research/runs/<vault_tag>/critic-findings-width.json \
-         research/runs/<vault_tag>/critic-findings-instruction.json \
-         research/runs/<vault_tag>/patch-log.json \
-         research/runs/<vault_tag>/polish-log.json; do
-  test -f "$f" || echo "MISSING: $f"
-done
-```
+1. Ensure required stages are recorded **done**, with their real outputs.
+   Full/premier/dissertation require initial 14.5; dissertation also requires
+   1.5, every planned chapter's steps 2–10 and `draft.md`, global comparisons
+   from step 6, then synthesis. Independent chapters and children may run in
+   parallel, respecting chapter dependencies. A skipped flag or placeholder
+   artifact cannot replace completed work.
+2. Record step 15 done after polish, then step 16 running before readability
+   edits and done after its recommendations/decisions are complete. Native
+   completion checks preserve the 14.5 → 15 → 16 boundaries. If completion
+   rejects missing/changed evidence, correct the named work; do not fabricate
+   a completion receipt. Reenter an affected stage with `--status running`
+   before doing renewed work and marking it done again.
+3. Read the **Final audit mode** section in `hyperresearch-14-5-cite-check`.
+   Extract from the exact final report bytes:
+   ```bash
+   {hpr_path} citecheck extract <vault_tag> --final --json
+   ```
+   This refuses incomplete/stale stages and writes
+   `research/runs/<vault_tag>/final-cite-check-pairs.json`. Spawn the same
+   cite-checker against those final selected pairs, with `audit_pass: final`,
+   and retain every selected supported/negative result plus body evidence in
+   `final-cite-check-findings.json`. Shards retain separate final-prefixed
+   paths and merge without dropping any result. Sampled coverage may retain
+   its declared weak remainder; call it unreviewed. Use
+   `--coverage-mode comprehensive` only when every pair will be reviewed.
+4. Any current final **critical** finding requires a real report/source
+   correction followed by fresh extraction and reviewed results. A same-byte
+   resolution log cannot clear it. If the report changed, rerun the affected
+   final-edit work (at least step 16 running/done) before extracting again.
+   Never overwrite initial citation evidence to make a final gate pass.
+5. Refresh retraction data, then run the ship gate:
+   ```bash
+   {hpr_path} sources retractions --tag <vault_tag> --json
+   {hpr_path} run finish <vault_tag> --json
+   ```
 
-(Light tier skips critics + patcher entirely — the critic-findings and patch-log files won't exist. That's expected; only `polish-log.json` is required for light.)
+`run finish` checks report structure/length/citation density, existing blocking
+content lints, required stage flags and output shapes, initial review history,
+and exact final citation extraction/selected coverage against current source
+bodies. Its existing manifest receipt binds the report, stages, outputs,
+profile/config and blocking lint outcomes. Mutations during verification or
+persistence reject approval. `run status`/`run resume` identify stale approvals;
+a current session's Stop hook cannot treat numbered flags alone as finish.
+Legacy manifests remain read-only diagnostics, never current approval.
 
-Then refresh retraction data and run the SHIP GATE:
-```bash
-{hpr_path} sources retractions --tag <vault_tag> --json   # ship-time retraction re-check (bypasses cache)
-{hpr_path} run finish <vault_tag> --json                  # THE ship gate: verify + manifest flip
-```
+**The gate's verdict is binding.** Correct the named report, source or stage
+work, regenerate the final audit for changed inputs, and rerun finish. For a
+length failure, preserve load-bearing coverage while compressing; quote
+failures require verbatim source text or removal of rhetorical quote marks;
+retracted citations require an explicit acknowledgement or removal. Every
+report edit invalidates the old final audit. Maximum 3 correction rounds; if
+still blocked, leave the run blocked and report failing checks honestly.
 
-`run finish` runs the whole verification battery — report exists, required headings, **length within the profile's word target (±20%)**, citation density, tier artifacts, cite-check resolution, **quote-integrity**, and **retracted-citations** — and flips the manifest to `done` only when every check passes. On failure it flips the run to `blocked (verify)` and exits 1.
+Ship only after `run finish` reports `"passed": true`. The report lives at
+`research/notes/final_report_<vault_tag>.md`. Recorded coverage and literal
+passages do not prove semantic truth, independent review or producer work.
 
-**The gate's verdict is final. You may not re-run individual rules and re-classify their errors as false positives.** If a check fails, change the REPORT until the gate passes:
-
-- `length-in-range` over the ceiling → spawn the synthesizer for ONE compression pass (its own output as input, target = middle of the word range). Do not re-run the critics afterward — go straight back to `run finish`.
-- `quote-integrity` → quotation marks are reserved for verbatim source text. Rhetorical or framing "quotes" lose their quotation marks (rewrite as plain or italicized prose via Edit); real quotes get fixed to verbatim or cut.
-- `retracted-citations` → acknowledge the retraction in the sentence or remove the citation.
-- Anything else → fix the specific artifact the check names.
-
-Re-run `{hpr_path} run finish <vault_tag> --json` after each fix round. Maximum 3 rounds; if the gate still fails, leave the run `blocked` and report the failing checks to the user honestly — a blocked run with a true manifest beats a shipped report that lies. Optional advisory: `{hpr_path} lint --rule numeric-consistency --json` (warnings only, never blocks).
-
-Ship only after `run finish` reports `"passed": true`: the final report lives at `research/notes/final_report_<vault_tag>.md`.
 
 ---
 
@@ -253,7 +283,7 @@ Ship only after `run finish` reports `"passed": true`: the final report lives at
 3. **At least one dialectical locus.** Step 4 must surface ≥1 dialectical locus unless skip is justified.
 4. **Every interim note commits to a position.** Step 5 investigators end with `## Committed position`.
 5. **`research/runs/<vault_tag>/comparisons.md` exists when loci count ≥ 1.** Step 6 is mandatory whenever step 4 produced any loci.
-6. **Steps are sequential at the outermost level, parallel within.** You cannot start step N+1 before step N completes. Within a step, parallelism is mandatory when there are multiple subagents.
+6. **Respect stage dependencies; parallelize independent children.** Initial citation review completes before polish; polish completes before readability; final citation extraction follows final edits. Chapter dependencies constrain their own starts. Independent chapters, drafts and critics may run in parallel. Correction loops reenter affected work rather than forging receipts.
 7. **Canonical research query is gospel everywhere.** Every subagent gets the verbatim query.
 8. **Hygiene rules apply to the final report only.** Workspace artifacts (scaffold, loci JSONs, interim notes, comparisons.md, patch log) can look however they need to look.
 9. **NEVER skip a step that the tier gate says to run.** For `full` tier, ALL 16 steps run. For `light`, the prescribed 5 steps run.

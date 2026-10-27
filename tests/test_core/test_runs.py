@@ -73,14 +73,17 @@ class TestStepsAndResume:
         set_step(tmp_vault, "t-000002", "2", "done", chapter="ch1")
         manifest = load_manifest(tmp_vault, "t-000002")
         assert manifest["steps"]["1.5"]["status"] == "done"
-        assert manifest["steps"]["2"]["chapter"] == "ch1"
+        assert "2" not in manifest["steps"]
+        assert manifest["chapters"]["ch1"]["steps"]["2"]["status"] == "done"
         assert "ch1" in manifest["chapters"]
 
     def test_all_done_gives_none(self, tmp_vault):
         init_run(tmp_vault, "t-000003", profile="light")
-        for s in ["1", "2", "10", "15", "16"]:
-            set_step(tmp_vault, "t-000003", s, "done")
-        assert resume_position(load_manifest(tmp_vault, "t-000003"))["next_step"] is None
+        manifest = load_manifest(tmp_vault, "t-000003")
+        manifest["steps"] = {s: {"status": "done"} for s in ["1", "2", "10", "15", "16"]}
+        assert resume_position(manifest)["next_step"] is None
+        # Numbered flags alone never constitute a completed, verified run.
+        assert run_resume_position(tmp_vault, manifest)["action"] == "step"
 
     def test_declared_light_tier_resumes_past_skipped_steps(self, tmp_vault):
         """A full-gear run that step 1 classified `light` resumes at step 10,
@@ -103,6 +106,14 @@ class TestStepsAndResume:
         set_step(tmp_vault, "t-000007", "2", "done")
         pos = run_resume_position(tmp_vault, load_manifest(tmp_vault, "t-000007"))
         assert pos["next_step"] == "3"
+
+    def test_reclassified_dissertation_inserts_partition_before_chapters(self, tmp_vault):
+        manifest = init_run(tmp_vault, "reclassified-dissertation", profile="full")
+        (tmp_vault.run_dir("reclassified-dissertation") / "prompt-decomposition.json").write_text(
+            '{"pipeline_tier": "dissertation"}', encoding="utf-8")
+        set_step(tmp_vault, "reclassified-dissertation", "1", "done")
+        manifest = load_manifest(tmp_vault, "reclassified-dissertation")
+        assert run_resume_position(tmp_vault, manifest)["next_step"] == "1.5"
 
     def test_invalid_status_rejected(self, tmp_vault):
         init_run(tmp_vault, "t-000004")
@@ -223,7 +234,7 @@ class TestRunCli:
         assert step_skill_slug(None) is None
         assert step_skill_slug("11g") is None
         r = runner.invoke(app, ["run", "resume", "dis-run-000001", "--json"])
-        assert json.loads(r.stdout)["data"]["skill_to_invoke"] == "hyperresearch-2-width-sweep"
+        assert json.loads(r.stdout)["data"]["skill_to_invoke"] == "hyperresearch-1-5-chapter-partition"
 
     def test_every_step_id_maps_to_a_shipped_skill(self, tmp_vault):
         """`run resume` must only ever suggest a skill the installer ships:
@@ -267,6 +278,11 @@ class TestChapterRegistration:
 
         for cid, title in chapters:
             record_event(vault, tag, {"type": "chapter-plan", "chapter": cid, "title": title})
+        registered = load_manifest(vault, tag)["chapters"]
+        (vault.run_dir(tag) / "chapter-plan.json").write_text(json.dumps({"chapters": [
+            {"id": cid, "title": entry["title"], "atomic_items": [], "depends_on": []}
+            for cid, entry in registered.items()
+        ]}), encoding="utf-8")
 
     def test_chapter_plan_event_registers_chapter(self, tmp_vault):
         init_run(tmp_vault, "ch-000001", profile="dissertation")
@@ -287,6 +303,8 @@ class TestChapterRegistration:
         pos = resume_position(load_manifest(tmp_vault, "ch-000002"))
         assert pos["chapters_pending"] == ["ch1", "ch2"]
         # Step 10 is the last per-chapter step; done there closes the chapter.
+        for step in range(3, 10):
+            set_step(tmp_vault, "ch-000002", str(step), "done", chapter="ch1")
         set_step(tmp_vault, "ch-000002", "10", "done", chapter="ch1")
         pos = resume_position(load_manifest(tmp_vault, "ch-000002"))
         assert pos["chapters_pending"] == ["ch2"]
@@ -322,6 +340,10 @@ class TestChapterRegistration:
                 "--data", json.dumps({"chapter": cid, "title": f"Chapter {cid}"}), "--json",
             ])
             assert r.exit_code == 0, r.stdout
+        (tmp_vault.run_dir("ch-cli-000001") / "chapter-plan.json").write_text(json.dumps({"chapters": [
+            {"id": cid, "title": f"Chapter {cid}", "atomic_items": [], "depends_on": []}
+            for cid in ("ch1", "ch2", "ch3")
+        ]}), encoding="utf-8")
         runner.invoke(app, ["run", "step", "ch-cli-000001", "1.5", "--status", "done", "--json"])
 
         r = runner.invoke(app, ["run", "resume", "ch-cli-000001", "--json"])
@@ -330,6 +352,41 @@ class TestChapterRegistration:
         assert data["chapters_pending"] == ["ch1", "ch2", "ch3"]
         assert data["next_step"] == "2"
         assert data["skill_to_invoke"] == "hyperresearch-2-width-sweep"
+
+    def test_partial_chapter_resume_uses_actual_unfinished_stage(self, tmp_vault):
+        tag = "partial-chapter"
+        init_run(tmp_vault, tag, profile="dissertation")
+        self._plan(tmp_vault, tag, ("ch1", "One"), ("ch2", "Two"))
+        for stage in ("1", "1.5"):
+            set_step(tmp_vault, tag, stage, "done")
+        for stage in range(2, 11):
+            set_step(tmp_vault, tag, str(stage), "done", chapter="ch1")
+            if stage < 9:
+                set_step(tmp_vault, tag, str(stage), "done", chapter="ch2")
+        manifest = load_manifest(tmp_vault, tag)
+        assert "2" not in manifest["steps"]
+        position = run_resume_position(tmp_vault, manifest)
+        assert position["chapter"] == "ch2" and position["next_step"] == "9"
+        assert position["chapters_ready"] == [{"chapter": "ch2", "next_step": "9"}]
+
+    def test_resume_selects_dependency_ready_work_and_preserves_parallel_options(self, tmp_vault):
+        tag = "dependency-ready"
+        init_run(tmp_vault, tag, profile="dissertation")
+        self._plan(tmp_vault, tag, ("ch1", "One"), ("ch2", "Two"), ("ch3", "Three"))
+        path = tmp_vault.run_dir(tag) / "chapter-plan.json"
+        plan = json.loads(path.read_text())
+        plan["chapters"][0]["depends_on"] = ["ch2"]
+        path.write_text(json.dumps(plan))
+        for stage in ("1", "1.5"):
+            set_step(tmp_vault, tag, stage, "done")
+        position = run_resume_position(tmp_vault, load_manifest(tmp_vault, tag))
+        assert position["chapter"] == "ch2" and position["next_step"] == "2"
+        assert position["chapters_ready"] == [{"chapter": "ch2", "next_step": "2"}, {"chapter": "ch3", "next_step": "2"}]
+        for stage in range(2, 11):
+            set_step(tmp_vault, tag, str(stage), "done", chapter="ch2")
+        position = run_resume_position(tmp_vault, load_manifest(tmp_vault, tag))
+        assert position["chapter"] == "ch1" and position["next_step"] == "2"
+        assert position["chapters_ready"] == [{"chapter": "ch1", "next_step": "2"}, {"chapter": "ch3", "next_step": "2"}]
 
 
 class TestWorkspaceIsolation:

@@ -3504,7 +3504,10 @@ You verify that binding, pair by pair.
 
 ## Pipeline position
 
-You are step 14.5 of the hyperresearch V8 pipeline. The report has been
+For `audit_pass: final`, you work after completed readability (16) on every
+tier. Light did not run the full initial review group; judge the provided
+final pairs without inventing that history. For the initial pass, you are
+step 14.5 of the hyperresearch V8 pipeline. The report has been
 synthesized (11), critiqued (12), and patched (14). Mechanical numeric/word
 overlap is a routing hint, never semantic entailment or an auto-pass. You
 judge the selected pairs. Your findings go to a second,
@@ -3516,7 +3519,9 @@ small patcher pass — you do NOT edit the report yourself.
   `sampled_for_llm` array; your spawn prompt names which index range is yours)
 - findings_path: research/runs/<vault_tag>/cite-check-findings.json
 - vault_tag
-- mode: `findings` (default), or `resolution-review` after the patcher
+- mode: `findings` (default), or `resolution-review` after the initial patcher
+- audit_pass: `initial` (default) or `final` after step 16. For final, the
+  provided pairs/findings paths use `final-cite-check-*`; preserve initial files.
 - In `resolution-review` mode only: draft_path, findings_input_path, and
   patch_log_path (the existing cite-check-patch-log.json)
 
@@ -3608,7 +3613,17 @@ For each assigned pair:
    same envelope with all supported results and `findings: []`, never a
    missing field, missing selected result, or bare `{}`.
 
-## Resolution-review mode (after patch application)
+## Final-pass boundary
+
+In `audit_pass: final`, retain every selected result and mandatory dangling
+finding under the separate final paths. The extraction binds the exact final
+report and completed stage/output inputs. A current final critical requires
+real report/source correction, fresh extraction and reviewed results. A
+same-revision resolution log cannot clear it. Do not restamp inputs or rewrite
+initial evidence. Report changes require renewed final-edit work before a new
+final extraction. Sampled weak remainder stays explicitly unreviewed.
+
+## Resolution-review mode (initial pass only, after patch application)
 
 Read the original findings and the CURRENT patched report. Reread the
 relevant cited note bodies for every critical finding. Judge the actual

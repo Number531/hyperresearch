@@ -270,13 +270,14 @@ def test_stop_gate_env_opt_out(running_vault):
     assert result.stdout == ""
 
 
-def test_stop_gate_silent_for_finished_run(running_vault):
-    from hyperresearch.core.runs import set_status
+def test_stop_gate_rejects_direct_done_transition(running_vault):
+    from hyperresearch.core.runs import RunError, set_status
 
-    set_status(running_vault, "gate-run", "done")
+    with pytest.raises(RunError, match="only run finish"):
+        set_status(running_vault, "gate-run", "done")
     result = _gate()
     assert result.exit_code == 0
-    assert result.stdout == ""
+    assert json.loads(result.stdout)["decision"] == "block"
 
 
 def test_stop_gate_follows_cwd_from_hook_input(running_vault, tmp_path, monkeypatch):

@@ -12,7 +12,7 @@ description: >
 
 # Step 14.5 — Cite-check (citation-sentence binding verification)
 
-**Tier gate:** Runs for `full` and `dissertation`. SKIP for `light` — a light report's citation volume doesn't justify the pass; the `quote-integrity` and `numeric-consistency` lint rules still cover it mechanically at the step-15 gate.
+**Tier gate:** The initial pass runs for `full`, `premier` and `dissertation`. `light` skips this initial group and receives only the separate final audit after step 16 (see Final audit mode below).
 
 **Goal:** judge each selected citation against its actual source body and fix negative findings. Default weak sampling leaves an explicit unreviewed remainder. Recorded coverage and literal evidence cannot guarantee semantic truth or independent review.
 
@@ -114,7 +114,11 @@ If any critical findings exist, spawn the `hyperresearch-cite-checker` again wit
 
 `claim-removed` is also a successful review verdict when the claim was actually removed. Otherwise use `status: "unresolved"`, `review_verdict: "unresolved"`, explain the blocker, and fix/review again before marking the step done. Every critical needs exactly one successful resolution; records for other known findings are permitted. Unknown or duplicate IDs, stale original/reviewed revisions, and `applied` entries alone fail the native gate. Use the checker's byte-hash procedure; the shared native identity API lives in `hyperresearch.core.citation_contracts`.
 
-**After any subsequent report edit, including steps 15 (polish) and 16 (readability), repeat `resolution-review` for the original critical findings before `run finish`.** The reviewer must reread the current report and relevant source bodies, then record the current byte revision. Preserve the original findings/pairs and `findings_report_revision`; never restamp a receipt without review or edit the report merely to reproduce an old hash. This refresh covers those original critical resolutions; it does not establish comprehensive review of later citation changes.
+**Complete the initial review now:** `run step <vault_tag> 14.5 --status done -j`
+validates coverage, source bytes and critical resolution against the then-current
+report and records bounded hashes in that existing step entry. Preserve these
+initial artifacts afterward. Later polish/readability edits receive a separate
+final audit; do not restamp the initial resolution log for later report bytes.
 
 Do not rewrite legacy findings or patch logs merely to make verification pass. Bare lists and legacy `{"findings": [...]}` remain read-only diagnostics; legacy nonempty findings cannot establish reviewed resolution.
 
@@ -131,3 +135,33 @@ Do not rewrite legacy findings or patch logs merely to make verification pass. B
 ## Next step
 
 Return to the entry skill and invoke `<% if platform == "codex" %>cat .hyperresearch/codex/steps/hyperresearch-15-polish.md<% else %>Skill(skill: "hyperresearch-15-polish")<% endif %>`.
+
+
+## Final audit mode (all tiers, after step 16)
+
+This is the existing citation procedure with separate final-pass paths, not an
+additional initial review group for light. Mark all required stages done with
+real outputs; step 16's completion must match the exact current report bytes.
+Run `{hpr_path} citecheck extract <vault_tag> --final -j`. Preserve the declared
+sampling mode/remainder. The extraction binds the stable stage/output inputs,
+including initial evidence hashes, and every actual report citation occurrence.
+
+Repeat extraction and findings-mode checker work above using:
+- `pairs_file: research/runs/<vault_tag>/final-cite-check-pairs.json`
+- `findings_path: research/runs/<vault_tag>/final-cite-check-findings.json`
+- `audit_pass: final`, `mode: findings`
+
+For parallel checkers use `final-cite-check-findings-a.json` / `-b.json` and
+retain/merge every selected ID, verdict and evidence record. Append every
+dangling occurrence exactly once as a critical finding. Final selected/body
+coverage obeys the same strict versioned contract as initial review.
+
+A current final critical cannot be cleared by a same-revision resolution log.
+Correct the report/source, reenter final editing when report bytes change
+(`run step <vault_tag> 16 --status running`, perform the affected review/edits,
+then `--status done`), extract again and review the fresh selected pairs.
+If application notes are needed, use `final-cite-check-patch-log.json`; preserve
+initial `cite-check-*` files. Never restamp final inputs or erase a finding to
+make the gate green. Run `{hpr_path} run finish <vault_tag> -j` after final
+coverage is complete and no current critical remains. This validates recorded
+coverage/literal passages, not semantic truth or producer independence.

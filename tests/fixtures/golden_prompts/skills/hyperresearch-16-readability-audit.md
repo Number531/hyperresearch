@@ -30,6 +30,9 @@ Read these inputs:
 
 ---
 
+Before work, record `{hpr_path} run step <vault_tag> 16 --status running -j`.
+Step 15 must be complete before step 16 can complete.
+
 ## Step 16.1 — Spawn the readability recommender
 
 Spawn ONE `hyperresearch-readability-recommender` subagent. Single spawn, runs once.
@@ -159,8 +162,19 @@ This is the audit trail. If a future review finds a readability problem we shoul
 
 ---
 
-## Pipeline complete
+## Complete final edits, then audit final citations
 
-Return to the entry skill (`hyperresearch`). Mark all todos complete. Tell the user the final report path.
+Record `{hpr_path} run step <vault_tag> 16 --status done -j` after the
+recommendations and decisions are valid and all chosen edits are complete.
+This binds the exact final report revision and stable stage/output inputs.
+Return to the entry skill's **Final integrity gate**: run
+`{hpr_path} citecheck extract <vault_tag> --final -j`, complete the separate
+final selected-pair review in `final-cite-check-findings.json`, then run
+`{hpr_path} run finish <vault_tag> -j`. Preserve initial citation artifacts.
 
-You're done.
+If later corrections change the report, reenter the affected final-edit work
+with step 16 running/done, then extract and review fresh final pairs. Repeating
+a done flag without renewed work cannot restamp changed inputs. Only a current
+successful finish permits shipping; after 3 failed correction rounds leave the
+run honestly blocked and report failing checks. These contracts bind recorded
+inputs and coverage, not semantic truth or proof of producer work.

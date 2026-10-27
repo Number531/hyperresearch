@@ -31,6 +31,9 @@ Read these inputs:
 
 ---
 
+Before work, record `{hpr_path} run step <vault_tag> 16 --status running -j`.
+Step 15 must be complete before step 16 can complete.
+
 ## Step 16.1 — Spawn the readability recommender
 
 Spawn ONE `hyperresearch-readability-recommender` subagent<% if platform == "codex" %> (custom agent `.codex/agents/hyperresearch-readability-recommender.toml`) and wait for it to finish<% else %><% endif %>. Single spawn, runs once.
@@ -171,10 +174,19 @@ This is the audit trail. If a future review finds a readability problem we shoul
 
 ---
 
-## Pipeline complete
+## Complete final edits, then audit final citations
 
-<% if platform == "codex" %>Return to the entry skill (`hyperresearch`) and run its **Final integrity gate** (`run finish`). Mark all plan items complete. Only after `run finish` reports `"passed": true` (or the run is honestly `blocked` after 3 fix rounds), tell the user the final report path and list any still-queued escalations.
+Record `{hpr_path} run step <vault_tag> 16 --status done -j` after the
+recommendations and decisions are valid and all chosen edits are complete.
+This binds the exact final report revision and stable stage/output inputs.
+Return to the entry skill's **Final integrity gate**: run
+`{hpr_path} citecheck extract <vault_tag> --final -j`, complete the separate
+final selected-pair review in `final-cite-check-findings.json`, then run
+`{hpr_path} run finish <vault_tag> -j`. Preserve initial citation artifacts.
 
-The run is not done until the gate has spoken.<% else %>Return to the entry skill (`hyperresearch`). Mark all todos complete. Tell the user the final report path.
-
-You're done.<% endif %>
+If later corrections change the report, reenter the affected final-edit work
+with step 16 running/done, then extract and review fresh final pairs. Repeating
+a done flag without renewed work cannot restamp changed inputs. Only a current
+successful finish permits shipping; after 3 failed correction rounds leave the
+run honestly blocked and report failing checks. These contracts bind recorded
+inputs and coverage, not semantic truth or proof of producer work.

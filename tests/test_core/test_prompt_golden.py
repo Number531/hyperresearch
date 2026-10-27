@@ -8,6 +8,9 @@ or template deliberately requires updating the golden, which makes prompt
 changes reviewable instead of silent.
 
 Deliberate deviations already folded into the goldens (2026-07-19):
+  - Finalization integrity (2026-10-27): separate final citation audit after
+    completed final edits for every tier; initial review evidence is preserved,
+    explicit final-audit/finish actions replace artifact-existence completion.
   - Selected citation coverage (2026-10-27): numeric/word overlap became
     routing-only; the checker retains every selected result and literal
     source-body evidence, with explicit weak sampling and shard ID coverage.

@@ -16,6 +16,132 @@ from hyperresearch.core.independence import canonical_url, compute_independence
 from hyperresearch.core.runs import init_run, run_report_data, set_step, verify_run
 
 
+@pytest.fixture(autouse=True)
+def _legacy_diagnostic_fixtures(request, monkeypatch):
+    """The pre-finalization structural fixtures intentionally carry no current approval.
+
+    Preserve their focused lint/schema assertions as read-only legacy diagnostics;
+    complete current-version runs are exercised separately below.
+    """
+    legacy = request.cls and request.cls.__name__ in {
+        "TestCJKLengthCheck", "TestClassifiedTierArtifacts", "TestTelemetryAndVerify",
+    }
+    legacy = legacy or (request.cls and request.cls.__name__ == "TestFinishGate"
+                        and request.function.__name__.startswith("test_cite_check_"))
+    if legacy:
+        original = init_run
+
+        def legacy_init(vault, tag, **kwargs):
+            manifest = original(vault, tag, **kwargs)
+            manifest.pop("finalization_version", None)
+            (vault.run_dir(tag) / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+            return manifest
+
+        monkeypatch.setattr(__import__(__name__, fromlist=["init_run"]), "init_run", legacy_init)
+
+
+def _write_supported_audit(vault, tag, report, *, final=False, rate=1.0):
+    from hyperresearch.core.citation_contracts import source_input
+    from hyperresearch.core.citecheck import write_pairs_file
+
+    pairs = write_pairs_file(vault, tag, report, sample_rate=rate, final=final)
+    payload = {"schema_version": 1, "report_revision": pairs["report_revision"],
+               "selected_pair_ids": pairs["selected_pair_ids"], "findings": [], "results": []}
+    for pair in pairs["sampled_for_llm"]:
+        snapshot, body = source_input(vault, pair["note_id"])
+        payload["results"].append({"pair_id": pair["pair_id"], "verdict": "supported",
+                                   "source_revision": snapshot["revision"], "source_excerpt": body.strip()[:80],
+                                   "evidence": "Synthetic recorded literal-body review."})
+    name = "final-cite-check-findings.json" if final else "cite-check-findings.json"
+    (vault.run_dir(tag) / name).write_text(json.dumps(payload), encoding="utf-8")
+    return pairs, payload
+
+
+def _complete_light(vault, tag, report):
+    """Shipped light outputs plus genuine stage transitions and selected results."""
+    run = vault.run_dir(tag)
+    for name in ("query.md", "scaffold.md", "temp/coverage-matrix.md"):
+        path = run / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("Synthetic bounded research input.", encoding="utf-8")
+    decomposition = json.loads((run / "prompt-decomposition.json").read_text())
+    decomposition["pipeline_tier"] = "light"
+    (run / "prompt-decomposition.json").write_text(json.dumps(decomposition), encoding="utf-8")
+    (run / "polish-log.json").write_text('{"applied": [], "escalations": []}', encoding="utf-8")
+    (run / "readability-recommendations.json").write_text("[]", encoding="utf-8")
+    (run / "readability-decisions.json").write_text(json.dumps({"total_recommendations": 0,
+        "applied": [], "skipped": [], "edit_failures": [], "net_char_delta_actual": 0}), encoding="utf-8")
+    for step in ("1", "2", "10", "15", "16"):
+        set_step(vault, tag, step, "done")
+    _write_supported_audit(vault, tag, report, final=True)
+
+
+def _complete_profile(vault, tag, profile="full"):
+    """Synthetic shipped producer artifacts; no live sources or model calls."""
+    from hyperresearch.core.runs import record_event
+
+    init_run(vault, tag, profile=profile, query="Synthetic query", session_id="final-session")
+    run = vault.run_dir(tag)
+    report = vault.notes_dir / f"final_report_{tag}.md"
+    report.write_text("## Findings\n" + "Source describes concurrent input and output [[python-async-patterns]].\n" * 80)
+    text_outputs = ["scaffold.md", "temp/coverage-matrix.md", "comparisons.md", "temp/corpus-critic-results.md",
+                    "temp/evidence-digest.md", "temp/synthesis-plan.md", "temp/synthesis-outline.md", "temp/synthesis-pass1.md",
+                    "temp/post-critic-fetch-log.md"]
+    json_outputs = {"temp/contradiction-graph.json": [], "temp/consensus-claims.json": [], "loci.json": {"loci": []},
+                    "temp/source-tensions.json": {"tensions": []}, "corpus-critic-gaps.json": {"gaps": []}}
+    for name in text_outputs:
+        path = run / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("Synthetic completed stage output.")
+    for name, payload in json_outputs.items():
+        (run / name).write_text(json.dumps(payload))
+    (run / "prompt-decomposition.json").write_text(json.dumps({"pipeline_tier": profile,
+        "response_format": "short", "required_section_headings": ["## Findings"]}))
+    for role in ("dialectic", "depth", "width", "instruction"):
+        (run / f"critic-findings-{role}.json").write_text('{"findings": []}')
+    (run / "patch-log.json").write_text(json.dumps({"total_findings": 0, "applied": [], "skipped": [],
+        "conflicts": [], "orchestrator_escalated": []}))
+    (run / "polish-log.json").write_text('{"applied": [], "escalations": []}')
+    (run / "readability-recommendations.json").write_text('{"recommendations": [], "summary": {"total_recommendations": 0}}')
+    (run / "readability-decisions.json").write_text(json.dumps({"total_recommendations": 0, "applied": [],
+        "skipped": [], "edit_failures": [], "net_char_delta_actual": 0}))
+    set_step(vault, tag, "1", "done")
+    if profile == "dissertation":
+        plan = {"chapters": [{"id": cid, "title": cid, "atomic_items": [cid], "depends_on": []} for cid in ("ch1", "ch2")]}
+        (run / "chapter-plan.json").write_text(json.dumps(plan))
+        for cid in ("ch1", "ch2"):
+            record_event(vault, tag, {"type": "chapter-plan", "chapter": cid, "title": cid})
+            chapter = run / "chapters" / cid
+            (chapter / "temp").mkdir(parents=True)
+            for name in ("comparisons.md", "temp/corpus-critic-results.md", "temp/evidence-digest.md", "draft.md"):
+                (chapter / name).write_text("Synthetic chapter output.")
+            for name, payload in json_outputs.items():
+                (chapter / name).write_text(json.dumps(payload))
+        set_step(vault, tag, "1.5", "done")
+        # Independent chapters interleave freely; no total timestamp serialization.
+        for stage in range(2, 11):
+            for cid in ("ch1", "ch2"):
+                set_step(vault, tag, str(stage), "done", chapter=cid)
+        set_step(vault, tag, "6", "done")
+        for stage in range(11, 15):
+            set_step(vault, tag, str(stage), "done")
+    elif profile != "light":
+        for angle in "abc":
+            (run / "temp" / f"draft-{angle}.md").write_text("Synthetic independent draft.")
+        for stage in range(2, 15):
+            set_step(vault, tag, str(stage), "done")
+    else:
+        for stage in ("2", "10"):
+            set_step(vault, tag, stage, "done")
+    if profile != "light":
+        _write_supported_audit(vault, tag, report)
+        set_step(vault, tag, "14.5", "done")
+    set_step(vault, tag, "15", "done")
+    set_step(vault, tag, "16", "done")
+    _write_supported_audit(vault, tag, report, final=True)
+    return report
+
+
 @pytest.fixture
 def cited_vault(seeded_vault):
     """Seeded vault + claims + a source row so citations resolve."""
@@ -764,8 +890,8 @@ class TestFinishGate:
     (hallucinated quotes assessed away, length gate never run) must now be
     mechanically blocking."""
 
-    def _well_formed_light_run(self, tmp_vault, tag: str, body: str | None = None):
-        init_run(tmp_vault, tag, profile="light")
+    def _well_formed_light_run(self, tmp_vault, tag: str, body: str | None = None, *, complete=True):
+        manifest = init_run(tmp_vault, tag, profile="light")
         run_dir = tmp_vault.run_dir(tag)
         (run_dir / "prompt-decomposition.json").write_text(json.dumps({
             "response_format": "short",
@@ -778,6 +904,13 @@ class TestFinishGate:
                 "Substantive sentence with real evidence attached [[src-note]]. " * 80
             )
         report.write_text(body, encoding="utf-8")
+        if complete and manifest.get("finalization_version") == 1:
+            from hyperresearch.core.note import write_note
+            from hyperresearch.core.sync import compute_sync_plan, execute_sync
+
+            write_note(tmp_vault.notes_dir, "Src Note", body="Synthetic source body supports the fixture sentence.")
+            execute_sync(tmp_vault, compute_sync_plan(tmp_vault, force=True))
+            _complete_light(tmp_vault, tag, report)
         return report
 
     def test_finish_marks_clean_run_done(self, tmp_vault):
@@ -803,7 +936,7 @@ class TestFinishGate:
             "Substantive context discusses concurrent input and output [[python-async-patterns]]. " * 80
         ) + unknown
         report = self._well_formed_light_run(cited_vault, tag, body)
-        pairs = write_pairs_file(cited_vault, tag, report, coverage_mode="comprehensive")
+        pairs = write_pairs_file(cited_vault, tag, report, coverage_mode="comprehensive", final=True)
         assert len(pairs["dangling"]) == 1 and pairs["unreviewed_pair_ids"] == []
         envelope = {"schema_version": 1, "report_revision": pairs["report_revision"],
                     "selected_pair_ids": pairs["selected_pair_ids"], "findings": [], "results": [{
@@ -812,13 +945,12 @@ class TestFinishGate:
                         "source_excerpt": "Python's async/await syntax enables concurrent I/O.",
                         "evidence": "Recorded source-body review fixture.",
                     } for pair in pairs["sampled_for_llm"]]}
-        path = cited_vault.run_dir(tag) / "cite-check-findings.json"
+        path = cited_vault.run_dir(tag) / "final-cite-check-findings.json"
         path.write_text(json.dumps(envelope), encoding="utf-8")
-        set_step(cited_vault, tag, "14.5", "done")
         blocked = finish_run(cited_vault, tag)
         checks = {c["name"]: c for c in blocked["verify"]["checks"]}
-        assert checks["cite-check-coverage"]["ok"] is False
-        assert "dangling" in checks["cite-check-coverage"]["detail"]
+        assert checks["finalization"]["ok"] is False
+        assert "dangling" in checks["finalization"]["detail"]
         assert blocked["manifest"]["status"] == "blocked"
         pair = pairs["dangling"][0]
         envelope["findings"] = [{
@@ -829,13 +961,17 @@ class TestFinishGate:
         }]
         path.write_text(json.dumps(envelope), encoding="utf-8")
         assert finish_run(cited_vault, tag)["verify"]["passed"] is False  # no reviewed resolution
-        report.write_text(body.replace(unknown, ""), encoding="utf-8")
         log = {"schema_version": 1, "findings_report_revision": pairs["report_revision"],
                "reviewed_report_revision": report_revision(report.read_bytes()), "resolutions": [{
                    "finding_id": pair["finding_id"], "status": "resolved", "review_verdict": "claim-removed",
                    "evidence": "Reread current report; the unknown-source claim is absent.",
                }]}
-        (cited_vault.run_dir(tag) / "cite-check-patch-log.json").write_text(json.dumps(log), encoding="utf-8")
+        (cited_vault.run_dir(tag) / "final-cite-check-patch-log.json").write_text(json.dumps(log), encoding="utf-8")
+        assert finish_run(cited_vault, tag)["verify"]["passed"] is False  # same-byte resolution cannot clear current critical
+        report.write_text(body.replace(unknown, ""), encoding="utf-8")
+        set_step(cited_vault, tag, "16", "running")
+        set_step(cited_vault, tag, "16", "done")
+        _write_supported_audit(cited_vault, tag, report, final=True)
         assert finish_run(cited_vault, tag)["verify"]["passed"] is True
 
     def test_finish_blocks_hallucinated_quote(self, tmp_vault):
@@ -886,6 +1022,9 @@ class TestFinishGate:
             "this claim stands as the report's own framing.",
         )
         report.write_text(fixed, encoding="utf-8")
+        set_step(tmp_vault, "fin-04", "16", "running")
+        set_step(tmp_vault, "fin-04", "16", "done")
+        _write_supported_audit(tmp_vault, "fin-04", report, final=True)
         assert finish_run(tmp_vault, "fin-04")["verify"]["passed"] is True
         assert load_manifest(tmp_vault, "fin-04")["status"] == "done"
 
@@ -1077,3 +1216,414 @@ class TestCiteCheckerAgentInstall:
         assert "SKEPTICAL" in body
         assert "{hpr_path}" not in body
         assert "<<" not in body
+
+
+class TestFinalizationContract:
+    def test_final_cli_and_finish_honor_custom_research_directory(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+
+        from hyperresearch.cli import app
+        from hyperresearch.core.note import write_note
+        from hyperresearch.core.runs import finish_run
+        from hyperresearch.core.sync import compute_sync_plan, execute_sync
+        from hyperresearch.core.vault import Vault
+
+        vault = Vault.init(tmp_path / "custom-vault", research_dir="docs/wiki")
+        write_note(vault.notes_dir, "Python Async Patterns", body="Synthetic source supports concurrent input and output.")
+        execute_sync(vault, compute_sync_plan(vault, force=True))
+        tag = "custom-dir"
+        _complete_profile(vault, tag, "light")
+        monkeypatch.chdir(vault.root)
+        result = CliRunner().invoke(app, ["citecheck", "extract", tag, "--final", "--sample-rate", "1", "--json"])
+        assert result.exit_code == 0, result.stdout
+        assert "docs/wiki/runs" in json.loads(result.stdout)["data"]["pairs_file"]
+        finished = finish_run(vault, tag)
+        assert finished["verify"]["passed"], [check for check in finished["verify"]["checks"] if not check["ok"]]
+
+    def test_known_tier_keeps_configured_scale(self, cited_vault):
+        from hyperresearch.core.runs import finish_run
+
+        with cited_vault.config_path.open("a") as config:
+            config.write("\n[profile.full]\nsource_min = 90\ncitation_density_min = 12\n")
+        _complete_profile(cited_vault, "custom-scale", "full")
+        result = finish_run(cited_vault, "custom-scale")
+        assert result["verify"]["passed"]
+        assert result["manifest"]["verify"]["inputs"]["profile"]["source_min"] == 90
+
+    def test_shipped_nonempty_output_shapes_remain_usable(self, cited_vault):
+        from hyperresearch.core.runs import finish_run
+
+        tag = "nonempty-outputs"
+        report = _complete_profile(cited_vault, tag)
+        run = cited_vault.run_dir(tag)
+        outputs = {
+            "temp/consensus-claims.json": ["Independent sources agree on this bounded claim."],
+            "critic-findings-depth.json": {"findings": [{"severity": "minor", "location": "Findings",
+                "issue": "A qualifier could help.", "recommendation": "Consider a bounded qualifier."}]},
+            "loci.json": {"loci": [{"name": "Mechanism", "one_line": "A bounded mechanism", "rationale": "Synthetic evidence.",
+                "flavor": "technical", "importance": 1, "uncertainty": 1, "disagreement": 1, "decision_impact": 1,
+                "composite_score": 4, "source_budget": 0}]},
+            "corpus-critic-gaps.json": {"gaps": [{"id": "cc-1", "priority": "high", "type": "strengthening"}]},
+            "polish-log.json": {"applied": [{"category": "hygiene", "description": "Checked fixture prose.", "chars_removed": 0}], "escalations": []},
+            "readability-recommendations.json": {"recommendations": [{"id": "rec-1", "category": "make-list", "severity": "minor",
+                "section": "Findings", "current": "Source describes", "recommended": "- Source describes", "rationale": "Optional list."}],
+                "summary": {"total_recommendations": 1}},
+            "readability-decisions.json": {"total_recommendations": 1, "applied": [],
+                "skipped": [{"id": "rec-1", "reason": "Preserve prose."}], "edit_failures": [], "net_char_delta_actual": 0},
+        }
+        for name, payload in outputs.items():
+            (run / name).write_text(json.dumps(payload))
+        for step in ("14.5", "15", "16"):
+            set_step(cited_vault, tag, step, "running")
+            set_step(cited_vault, tag, step, "done")
+        _write_supported_audit(cited_vault, tag, report, final=True)
+        assert finish_run(cited_vault, tag)["verify"]["passed"]
+
+    @pytest.mark.parametrize("profile", ["light", "full", "premier", "dissertation"])
+    def test_valid_tier_matrix_and_current_receipt(self, cited_vault, profile):
+        from hyperresearch.core.runs import approval_current, finish_run, load_manifest
+
+        tag = f"current-{profile}"
+        _complete_profile(cited_vault, tag, profile)
+        result = finish_run(cited_vault, tag)
+        assert result["verify"]["passed"], result["verify"]["checks"]
+        manifest = load_manifest(cited_vault, tag)
+        assert approval_current(cited_vault, manifest)
+        assert manifest["verify"]["inputs"]["report_revision"]
+        if profile == "light":
+            assert not (cited_vault.run_dir(tag) / "cite-check-pairs.json").exists()
+
+    @pytest.mark.parametrize("profile,stage", [("light", "15"), ("full", "14.5"), ("premier", "12"), ("dissertation", "1.5")])
+    def test_required_flags_cannot_be_faked_or_skipped(self, cited_vault, profile, stage):
+        from hyperresearch.core.runs import finish_run, load_manifest, manifest_path
+
+        tag = "missing-stage"
+        _complete_profile(cited_vault, tag, profile)
+        manifest = load_manifest(cited_vault, tag)
+        manifest["steps"][stage]["status"] = "skipped"
+        manifest["profile_steps"].remove(stage)  # recovery state cannot waive the tier contract
+        manifest["status"] = "done"  # forged status cannot replace a receipt
+        manifest_path(cited_vault, tag).write_text(json.dumps(manifest))
+        assert finish_run(cited_vault, tag)["verify"]["passed"] is False
+
+    @pytest.mark.parametrize("name,contents", [
+        ("polish-log.json", None), ("polish-log.json", "[]"), ("polish-log.json", '{"applied": []}'),
+        ("critic-findings-depth.json", "{}"), ("patch-log.json", '{"applied": []}'),
+        ("loci.json", '{"loci": 1}'), ("temp/contradiction-graph.json", "{}"),
+        ("readability-decisions.json", "{}"), ("temp/draft-b.md", ""),
+        ("critic-findings-depth.json", '{"findings": [{}]}'),
+        ("loci.json", '{"loci": [{}]}'), ("corpus-critic-gaps.json", '{"gaps": [{}]}'),
+        ("polish-log.json", '{"applied": [{}], "escalations": []}'),
+        ("readability-recommendations.json", '[{"id": "rec-1"}]'),
+    ])
+    def test_required_outputs_are_validated(self, cited_vault, name, contents):
+        from hyperresearch.core.runs import finish_run
+
+        _complete_profile(cited_vault, "bad-output")
+        path = cited_vault.run_dir("bad-output") / name
+        if contents is None:
+            path.unlink()
+        else:
+            path.write_text(contents)
+        assert finish_run(cited_vault, "bad-output")["verify"]["passed"] is False
+
+    @pytest.mark.parametrize("kind", ["pending", "unregistered", "missing-draft", "cycle", "dependency-order"])
+    def test_exact_chapter_completion_and_dependencies(self, cited_vault, kind):
+        from hyperresearch.core.runs import finish_run, load_manifest, manifest_path
+
+        tag = "chapter-negative"
+        _complete_profile(cited_vault, tag, "dissertation")
+        run = cited_vault.run_dir(tag)
+        manifest = load_manifest(cited_vault, tag)
+        if kind == "pending":
+            manifest["chapters"]["ch1"]["steps"]["9"]["status"] = "pending"
+        elif kind == "unregistered":
+            del manifest["chapters"]["ch2"]
+        elif kind == "missing-draft":
+            (run / "chapters/ch2/draft.md").unlink()
+        else:
+            plan = json.loads((run / "chapter-plan.json").read_text())
+            plan["chapters"][0]["depends_on"] = ["ch2"]
+            if kind == "cycle":
+                plan["chapters"][1]["depends_on"] = ["ch1"]
+            (run / "chapter-plan.json").write_text(json.dumps(plan))
+        manifest_path(cited_vault, tag).write_text(json.dumps(manifest))
+        assert finish_run(cited_vault, tag)["verify"]["passed"] is False
+
+    def test_outer_boundaries_and_initial_review_snapshot_survive_polish(self, cited_vault):
+        from hyperresearch.core.runs import RunError, finish_run, load_manifest
+
+        tag = "initial-preserved"
+        report = _complete_profile(cited_vault, tag)
+        initial = {name: (cited_vault.run_dir(tag) / name).read_bytes() for name in ("cite-check-pairs.json", "cite-check-findings.json")}
+        set_step(cited_vault, tag, "14.5", "running")
+        with pytest.raises(RunError, match=r"14\.5"):
+            set_step(cited_vault, tag, "15", "done")
+        set_step(cited_vault, tag, "14.5", "done")
+        set_step(cited_vault, tag, "15", "running")
+        with pytest.raises(RunError, match="15"):
+            set_step(cited_vault, tag, "16", "done")
+        set_step(cited_vault, tag, "15", "done")
+        report.write_bytes(report.read_bytes() + b"\nPolished conclusion.\n")
+        with pytest.raises(RunError, match="restart"):
+            set_step(cited_vault, tag, "16", "done")
+        set_step(cited_vault, tag, "16", "running")
+        set_step(cited_vault, tag, "16", "done")
+        _write_supported_audit(cited_vault, tag, report, final=True)
+        assert finish_run(cited_vault, tag)["verify"]["passed"]
+        assert load_manifest(cited_vault, tag)["steps"]["14.5"]["completion"]["report_revision"] != load_manifest(cited_vault, tag)["verify"]["inputs"]["report_revision"]
+        assert all((cited_vault.run_dir(tag) / name).read_bytes() == data for name, data in initial.items())
+
+    def test_initial_critical_requires_real_review_before_completion(self, cited_vault):
+        from hyperresearch.core.citation_contracts import report_revision
+        from hyperresearch.core.runs import RunError, finish_run
+
+        tag = "initial-critical"
+        report = _complete_profile(cited_vault, tag)
+        run = cited_vault.run_dir(tag)
+        set_step(cited_vault, tag, "14.5", "running")
+        pairs, payload = _write_supported_audit(cited_vault, tag, report)
+        pair = pairs["sampled_for_llm"][0]
+        payload["results"][0]["verdict"] = "wrong-source"
+        payload["findings"] = [{"pair_id": pair["pair_id"], "finding_id": pair["finding_id"],
+            "sentence": pair["sentence"], "cited_note_id": pair["note_id"], "correct_note_id": None,
+            "verdict": "wrong-source", "severity": "critical", "evidence": "Recorded source mismatch.",
+            "suggested_fix": "Remove the claim."}]
+        (run / "cite-check-findings.json").write_text(json.dumps(payload))
+        with pytest.raises(RunError):
+            set_step(cited_vault, tag, "14.5", "done")
+        report.write_text(report.read_text().replace(pair["sentence"], "", 1))
+        log = {"schema_version": 1, "findings_report_revision": pairs["report_revision"],
+               "reviewed_report_revision": report_revision(report.read_bytes()), "resolutions": [{
+                   "finding_id": pair["finding_id"], "status": "resolved", "review_verdict": "claim-removed",
+                   "evidence": "Recorded reread of the corrected report; assigned occurrence removed."}]}
+        (run / "cite-check-patch-log.json").write_text(json.dumps(log))
+        set_step(cited_vault, tag, "14.5", "done")
+        initial = (run / "cite-check-patch-log.json").read_bytes()
+        set_step(cited_vault, tag, "15", "running")
+        set_step(cited_vault, tag, "15", "done")
+        set_step(cited_vault, tag, "16", "running")
+        report.write_bytes(report.read_bytes() + b"\nPolished ending.\n")
+        set_step(cited_vault, tag, "16", "done")
+        _write_supported_audit(cited_vault, tag, report, final=True)
+        assert finish_run(cited_vault, tag)["verify"]["passed"]
+        assert (run / "cite-check-patch-log.json").read_bytes() == initial
+
+    @pytest.mark.parametrize("kind", ["report", "source", "audit", "stage", "output"])
+    def test_stale_done_receipts_are_detected_without_status_mutation(self, cited_vault, kind):
+        from hyperresearch.core.codex import stop_gate_decision
+        from hyperresearch.core.runs import (
+            finish_run,
+            load_manifest,
+            manifest_path,
+            run_resume_position,
+            status_summary,
+        )
+
+        tag = "stale-done"
+        report = _complete_profile(cited_vault, tag)
+        assert finish_run(cited_vault, tag)["verify"]["passed"]
+        assert stop_gate_decision(cited_vault, session_id="final-session") is None
+        run = cited_vault.run_dir(tag)
+        if kind == "report":
+            report.write_bytes(report.read_bytes() + b"\n")
+        elif kind == "source":
+            path = cited_vault.notes_dir / "python-async-patterns.md"
+            path.write_bytes(path.read_bytes() + b"\nChanged source.\n")
+        elif kind == "audit":
+            (run / "final-cite-check-findings.json").write_text("{}")
+        elif kind == "stage":
+            manifest = load_manifest(cited_vault, tag)
+            manifest["steps"]["10"]["finished_at"] = "changed"
+            manifest_path(cited_vault, tag).write_text(json.dumps(manifest))
+        else:
+            (run / "polish-log.json").write_text('{"applied": [], "escalations": [], "changed": true}')
+        before = manifest_path(cited_vault, tag).read_bytes()
+        assert status_summary(cited_vault, tag)["approval_current"] is False
+        assert run_resume_position(cited_vault, load_manifest(cited_vault, tag))["action"] != "complete"
+        assert stop_gate_decision(cited_vault, session_id="final-session")["decision"] == "block"
+        assert manifest_path(cited_vault, tag).read_bytes() == before
+
+    @pytest.mark.parametrize("during", ["verify", "before-save", "after-save", "finish-event"])
+    def test_mutation_across_verification_and_persistence_is_rejected(self, cited_vault, monkeypatch, during):
+        from hyperresearch.core import runs
+
+        tag = "mutation"
+        report = _complete_profile(cited_vault, tag)
+        original_verify, original_save = runs.verify_run, runs._save
+        original_event = runs.record_event
+        if during == "verify":
+            from hyperresearch.cli import lint
+
+            original_lint = lint._check_quote_integrity
+
+            def mutate_lint(*args):
+                report.write_bytes(report.read_bytes() + b"\n")
+                return original_lint(*args)
+
+            monkeypatch.setattr(lint, "_check_quote_integrity", mutate_lint)
+        elif during == "before-save":
+            def mutate_verify(*args):
+                result = original_verify(*args)
+                report.write_bytes(report.read_bytes() + b"\n")
+                return result
+
+            monkeypatch.setattr(runs, "verify_run", mutate_verify)
+        elif during == "after-save":
+            def mutate_save(*args):
+                original_save(*args)
+                report.write_bytes(report.read_bytes() + b"\n")
+
+            monkeypatch.setattr(runs, "_save", mutate_save)
+        else:
+            def mutate_event(vault, vault_tag, event):
+                original_event(vault, vault_tag, event)
+                if event.get("type") == "finish" and event.get("passed") is True:
+                    report.write_bytes(report.read_bytes() + b"\n")
+
+            monkeypatch.setattr(runs, "record_event", mutate_event)
+        result = runs.finish_run(cited_vault, tag)
+        assert result["verify"]["passed"] is False
+        assert runs.load_manifest(cited_vault, tag)["status"] == "blocked"
+        events = [json.loads(line) for line in (cited_vault.run_dir(tag) / "events.jsonl").read_text().splitlines()]
+        finishes = [event for event in events if event.get("type") == "finish"]
+        assert finishes[-1]["passed"] is False
+        if during == "finish-event":
+            assert finishes[-2]["passed"] is True
+            assert finishes[-1]["invalidated"] is True
+
+    def test_final_actions_and_truthful_sampled_coverage(self, cited_vault):
+        from hyperresearch.core.runs import finish_run, load_manifest, run_resume_position
+
+        tag = "sampled-final"
+        report = _complete_profile(cited_vault, tag, "light")
+        (cited_vault.run_dir(tag) / "final-cite-check-findings.json").unlink()
+        position = run_resume_position(cited_vault, load_manifest(cited_vault, tag))
+        assert position["next_step"] is None and position["action"] == "final-audit"
+        assert "--final" in position["command"]
+        pairs, _ = _write_supported_audit(cited_vault, tag, report, final=True, rate=0.25)
+        assert len(pairs["unreviewed_pair_ids"]) == 60
+        assert run_resume_position(cited_vault, load_manifest(cited_vault, tag))["action"] == "finish"
+        assert finish_run(cited_vault, tag)["verify"]["passed"]
+
+    def test_final_cli_refuses_incomplete_inputs_and_uses_distinct_paths(self, cited_vault, monkeypatch):
+        from typer.testing import CliRunner
+
+        from hyperresearch.cli import app
+        from hyperresearch.core.runs import load_manifest, manifest_path
+
+        tag = "final-cli"
+        _complete_profile(cited_vault, tag, "light")
+        monkeypatch.chdir(cited_vault.root)
+        result = CliRunner().invoke(app, ["citecheck", "extract", tag, "--final", "--json"])
+        assert result.exit_code == 0, result.stdout
+        assert json.loads(result.stdout)["data"]["pairs_file"].endswith("final-cite-check-pairs.json")
+        assert not (cited_vault.run_dir(tag) / "cite-check-pairs.json").exists()
+        manifest = load_manifest(cited_vault, tag)
+        manifest["steps"]["15"]["status"] = "pending"
+        manifest_path(cited_vault, tag).write_text(json.dumps(manifest))
+        result = CliRunner().invoke(app, ["citecheck", "extract", tag, "--final", "--json"])
+        assert result.exit_code == 1
+
+    def test_plain_status_and_legacy_diagnostics_do_not_claim_completion(self, cited_vault, monkeypatch):
+        from typer.testing import CliRunner
+
+        from hyperresearch.cli import app
+        from hyperresearch.core.runs import load_manifest, manifest_path
+
+        tag = "plain-status"
+        _complete_profile(cited_vault, tag, "light")
+        (cited_vault.run_dir(tag) / "final-cite-check-findings.json").unlink()
+        monkeypatch.chdir(cited_vault.root)
+        runner = CliRunner()
+        status = runner.invoke(app, ["run", "status", tag])
+        assert status.exit_code == 0
+        assert "final-audit" in status.stdout and "unverified" in status.stdout
+        manifest = load_manifest(cited_vault, tag)
+        manifest.pop("finalization_version")
+        path = manifest_path(cited_vault, tag)
+        path.write_text(json.dumps(manifest))
+        before = path.read_bytes()
+        for command in ("verify", "resume", "finish"):
+            result = runner.invoke(app, ["run", command, tag])
+            assert "diagnostic" in result.stdout.lower()
+            assert path.read_bytes() == before
+
+    def test_even_consistent_dropped_final_pairs_fail_actual_extraction(self, cited_vault):
+        from hyperresearch.core.runs import finish_run
+
+        tag = "dropped-final"
+        _complete_profile(cited_vault, tag, "light")
+        run = cited_vault.run_dir(tag)
+        pairs = json.loads((run / "final-cite-check-pairs.json").read_text())
+        pairs.update({"pairs": [], "selected_pair_ids": [], "unreviewed_pair_ids": [], "sampled_for_llm": [], "dangling": [],
+                      "summary": {"total": 0, "needs_llm": 0, "dangling": 0, "selected": 0, "unreviewed": 0}})
+        (run / "final-cite-check-pairs.json").write_text(json.dumps(pairs))
+        (run / "final-cite-check-findings.json").write_text(json.dumps({"schema_version": 1,
+            "report_revision": pairs["report_revision"], "selected_pair_ids": [], "results": [], "findings": []}))
+        result = finish_run(cited_vault, tag)
+        assert not result["verify"]["passed"]
+        assert "actual report extraction" in next(c["detail"] for c in result["verify"]["checks"] if c["name"] == "finalization")
+
+    @pytest.mark.parametrize("kind", ["config", "retraction", "quote-support"])
+    def test_existing_blocking_gate_inputs_invalidate_done_receipt(self, cited_vault, kind):
+        from hyperresearch.core.runs import finish_run, status_summary
+
+        tag = "blocking-inputs"
+        report = _complete_profile(cited_vault, tag, "light")
+        if kind == "quote-support":
+            report.write_text(report.read_text() + '\nEvidence says "Fundamental patterns for concurrent programming."\n')
+            set_step(cited_vault, tag, "16", "running")
+            set_step(cited_vault, tag, "16", "done")
+            _write_supported_audit(cited_vault, tag, report, final=True)
+        assert finish_run(cited_vault, tag)["verify"]["passed"]
+        if kind == "config":
+            with cited_vault.config_path.open("a") as config:
+                config.write("\n[profile.light]\ncitation_density_min = 10000\n")
+        elif kind == "retraction":
+            cited_vault.db.execute("UPDATE notes SET is_retracted = 1 WHERE id = 'python-async-patterns'")
+            cited_vault.db.commit()
+        else:
+            cited_vault.db.execute("DELETE FROM notes_fts WHERE id = 'concurrency'")
+            cited_vault.db.commit()
+        assert status_summary(cited_vault, tag)["approval_current"] is False
+        assert verify_run(cited_vault, tag)["passed"] is False
+
+    @pytest.mark.parametrize("version", [True, False, "1", 1.0, 2])
+    def test_finalization_discriminator_is_strict_and_read_only(self, tmp_vault, version):
+        from hyperresearch.core.runs import finish_run, manifest_path
+
+        manifest = init_run(tmp_vault, "unknown-version", profile="light")
+        manifest["finalization_version"] = version
+        path = manifest_path(tmp_vault, "unknown-version")
+        path.write_text(json.dumps(manifest))
+        before = path.read_bytes()
+        assert finish_run(tmp_vault, "unknown-version")["verify"]["passed"] is False
+        assert path.read_bytes() == before
+    def test_fake_finish_cannot_skip_polish_or_final_audit(self, tmp_vault):
+        from hyperresearch.core.runs import finish_run
+
+        TestFinishGate()._well_formed_light_run(tmp_vault, "missing-polish", complete=False)
+        result = finish_run(tmp_vault, "missing-polish")
+        assert result["verify"]["passed"] is False
+        assert result["manifest"]["status"] == "blocked"
+
+    def test_legacy_finish_is_read_only_diagnostic(self, tmp_vault):
+        from hyperresearch.core.runs import finish_run, manifest_path
+
+        TestFinishGate()._well_formed_light_run(tmp_vault, "legacy-diagnostic")
+        path = manifest_path(tmp_vault, "legacy-diagnostic")
+        manifest = json.loads(path.read_text())
+        manifest.pop("finalization_version", None)
+        path.write_text(json.dumps(manifest))
+        before = path.read_bytes()
+        result = finish_run(tmp_vault, "legacy-diagnostic")
+        assert result["verify"]["passed"] is False
+        assert path.read_bytes() == before
+
+    def test_full_required_stages_include_initial_citation_review_in_order(self, tmp_vault):
+        from hyperresearch.core.runs import _required_stage_ids
+
+        manifest = init_run(tmp_vault, "fractional-required")
+        stages = _required_stage_ids(manifest, tmp_vault.run_dir("fractional-required"), tmp_vault.config_path)
+        assert stages[stages.index("14") + 1:stages.index("16")] == ["14.5", "15"]
