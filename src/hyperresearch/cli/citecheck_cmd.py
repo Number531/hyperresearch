@@ -18,6 +18,7 @@ def citecheck_extract(
     report: str | None = typer.Option(None, "--report", help="Report path (default: research/notes/final_report_<tag>.md)"),
     sample_rate: float = typer.Option(0.6, "--sample-rate", help="Fraction of weak (non-number-bearing) needs-llm pairs to check; number-bearing sentences are always 100%"),
     coverage_mode: str = typer.Option("sampled", "--coverage-mode", help="sampled (explicit weak remainder) or comprehensive (every pair selected)"),
+    final: bool = typer.Option(False, "--final", help="Final audit after completed final edits; preserve initial citation artifacts"),
     json_output: bool = typer.Option(False, "--json", "-j", help="JSON output"),
 ) -> None:
     """Extract (sentence, citation) pairs from the final report and triage them.
@@ -50,7 +51,7 @@ def citecheck_extract(
 
     vault.auto_sync()
     report_path = Path(report) if report else (
-        vault.root / "research" / "notes" / f"final_report_{vault_tag}.md"
+        vault.notes_dir / f"final_report_{vault_tag}.md"
     )
     if not report_path.exists():
         msg = f"report not found: {report_path}"
@@ -63,6 +64,7 @@ def citecheck_extract(
     try:
         result = write_pairs_file(
             vault, vault_tag, report_path, sample_rate=sample_rate, coverage_mode=coverage_mode,
+            final=final,
         )
     except (CitationContractError, OSError, UnicodeError) as exc:
         if json_output:
@@ -72,7 +74,7 @@ def citecheck_extract(
         raise typer.Exit(1) from exc
     summary = result["summary"]
     data = {
-        "pairs_file": str(vault.run_dir(vault_tag) / "cite-check-pairs.json"),
+        "pairs_file": str(vault.run_dir(vault_tag) / ("final-cite-check-pairs.json" if final else "cite-check-pairs.json")),
         "summary": summary,
         "sampled_for_llm": len(result["sampled_for_llm"]),
         "dangling": len(result["dangling"]),

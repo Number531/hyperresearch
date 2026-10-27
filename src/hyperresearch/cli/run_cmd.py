@@ -86,7 +86,7 @@ def run_status(
     json_output: bool = typer.Option(False, "--json", "-j", help="JSON output"),
 ) -> None:
     """Show a run's manifest + resume position + stall/budget state."""
-    from hyperresearch.core.runs import RunError, status_summary
+    from hyperresearch.core.runs import RunError, is_current_run, status_summary
 
     vault = _vault_or_exit(json_output)
     tag = _resolve_tag(vault, vault_tag, json_output)
@@ -100,12 +100,16 @@ def run_status(
         raise typer.Exit(1)
 
     # Browser-lane queue depth for this run
-    try:
-        from hyperresearch.core.escalation import queue_stats
+    if is_current_run(summary):
+        try:
+            from hyperresearch.core.escalation import queue_stats
 
-        summary["escalations"] = queue_stats(vault.db, vault_tag=tag)
-    except Exception:
+            summary["escalations"] = queue_stats(vault.db, vault_tag=tag)
+        except Exception:
+            summary["escalations"] = None
+    else:
         summary["escalations"] = None
+        summary["escalations_diagnostic"] = "unavailable/unverified: legacy or unknown finalization contract; queue lookup omitted and database left unopened"
 
     if json_output:
         output(success(summary, vault=str(vault.root)), json_mode=True)
@@ -118,6 +122,8 @@ def run_status(
                 f"inference_depth={levers.get('inference_depth', 'standard')}"
             )
         esc = summary.get("escalations")
+        if summary.get("escalations_diagnostic"):
+            console.print(f"  [yellow]escalations:[/] {summary['escalations_diagnostic']}")
         if esc and (esc.get("queued") or esc.get("needs_human")):
             console.print(
                 f"  [yellow]escalations:[/] {esc['queued']} queued, {esc['needs_human']} need the human"
@@ -126,7 +132,10 @@ def run_status(
             console.print("  [yellow]possibly stalled — no manifest update recently[/]")
         resume = summary["resume"]
         console.print(f"  done: {', '.join(resume['done_steps']) or '-'}")
-        console.print(f"  next: {resume['next_step'] or '(complete)'}")
+        console.print(f"  next: {resume['next_step'] or resume.get('action', 'unverified')}")
+        console.print(f"  finalization: {summary['finalization_diagnostic']}")
+        if resume.get("command"):
+            console.print(f"  command: hyperresearch {resume['command']}")
         spend = summary.get("spend", {})
         console.print(
             f"  API-equiv spend: ~${spend.get('estimated_usd', 0)} | {spend.get('sources_fetched', 0)} sources "
@@ -168,7 +177,13 @@ def run_resume(
 ) -> None:
     """Print the exact position a recovering orchestrator should continue from."""
     from hyperresearch.core.hooks import step_skill_slug
-    from hyperresearch.core.runs import RunError, load_manifest, run_resume_position, set_status
+    from hyperresearch.core.runs import (
+        RunError,
+        is_current_run,
+        load_manifest,
+        run_resume_position,
+        set_status,
+    )
 
     vault = _vault_or_exit(json_output)
     tag = _resolve_tag(vault, vault_tag, json_output)
@@ -182,7 +197,7 @@ def run_resume(
         raise typer.Exit(1)
 
     position = run_resume_position(vault, manifest)
-    if manifest["status"] in ("paused", "blocked", "failed"):
+    if is_current_run(manifest) and manifest["status"] in ("paused", "blocked", "failed"):
         set_status(vault, tag, "running")
 
     data = {
@@ -200,8 +215,12 @@ def run_resume(
     if json_output:
         output(success(data, vault=str(vault.root)), json_mode=True)
     else:
-        if position["next_step"] is None:
-            console.print(f"[green]{tag}[/] — all profile steps complete.")
+        if position.get("command"):
+            console.print(f"[yellow]{tag}[/] — {position['action']}: hyperresearch {position['command']}")
+        elif position.get("action") == "legacy-diagnostic":
+            console.print(f"[yellow]{tag}[/] — legacy read-only diagnostic; current approval unavailable.")
+        elif position["next_step"] is None:
+            console.print(f"[green]{tag}[/] — verified finish approval is current.")
         else:
             console.print(f"[green]{tag}[/] — resume at step {position['next_step']}")
             console.print(f"  Skill(skill: \"{data['skill_to_invoke']}\")")
@@ -507,7 +526,10 @@ def run_verify(
         for c in result["checks"]:
             mark = "[green]ok[/]" if c["ok"] else "[red]FAIL[/]"
             console.print(f"  {mark} {c['name']}: {c['detail']}")
-        console.print("[green]PASSED[/]" if result["passed"] else "[red]FAILED[/]")
+        if result.get("diagnostic_only"):
+            console.print("[yellow]Legacy read-only diagnostic; current finish approval unavailable.[/]")
+        else:
+            console.print("[green]PASSED[/]" if result["passed"] else "[red]FAILED[/]")
     if not result["passed"]:
         raise typer.Exit(1)
 
@@ -545,7 +567,9 @@ def run_finish(
             mark = "[green]ok[/]" if c["ok"] else "[red]FAIL[/]"
             console.print(f"  {mark} {c['name']}: {c['detail']}")
         status = result["manifest"]["status"]
-        if verify["passed"]:
+        if verify.get("diagnostic_only"):
+            console.print(f"[yellow]Legacy read-only diagnostic[/] — recorded status: {status}; current approval unavailable. Historical artifacts preserved.")
+        elif verify["passed"]:
             console.print(f"[green]SHIPPED[/] — run status: {status}")
         else:
             console.print(

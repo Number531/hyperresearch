@@ -467,7 +467,7 @@ def stop_gate_decision(vault, now: datetime | None = None, *, session_id: str | 
     """
     from hyperresearch.core.hooks import step_skill_slug
     from hyperresearch.core.platforms import CODEX, paths_for
-    from hyperresearch.core.runs import list_runs, run_resume_position
+    from hyperresearch.core.runs import is_current_run, list_runs, run_resume_position
 
     if not valid_session_id(session_id):
         return None
@@ -475,7 +475,9 @@ def stop_gate_decision(vault, now: datetime | None = None, *, session_id: str | 
     if len(owned) != 1:
         return None
     manifest = owned[0]
-    if manifest.get("status") not in _ACTIVE_STATUSES:
+    if not is_current_run(manifest):
+        return None
+    if manifest.get("status") not in (*_ACTIVE_STATUSES, "done"):
         return None
     try:
         updated = datetime.fromisoformat(manifest["updated_at"])
@@ -487,9 +489,16 @@ def stop_gate_decision(vault, now: datetime | None = None, *, session_id: str | 
     if now - updated > STOP_GATE_WINDOW:
         return None
 
-    next_step = run_resume_position(vault, manifest)["next_step"]
+    try:
+        position = run_resume_position(vault, manifest)
+    except (ValueError, OSError, UnicodeError, TypeError, KeyError, AttributeError):
+        return {"decision": "block", "reason": f"{manifest.get('vault_tag')} has unreadable current-run completion evidence. Inspect hyperresearch run status {manifest.get('vault_tag')} --json; correct the evidence or explicitly block/pause the run."}
+    next_step = position["next_step"]
     if next_step is None:
-        return None
+        if position.get("action") == "complete":
+            return None
+        command = position.get("command", f"run resume {manifest.get('vault_tag')} --json")
+        return {"decision": "block", "reason": f"{manifest.get('vault_tag')} lacks a current verified finish. Continue with hyperresearch {command}; follow the entry skill's final citation audit procedure."}
     skill = step_skill_slug(next_step) or f"step {next_step}"
     step_file = f"{paths_for(CODEX).steps_dir}/{skill}.md"
     tag = manifest.get("vault_tag", "the current run")

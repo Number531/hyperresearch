@@ -22,12 +22,16 @@ vault. Final reports ship to `research/notes/final_report_<vault_tag>.md`.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
 MANIFEST_VERSION = 1
 MANIFEST_NAME = "run.json"
+FINALIZATION_VERSION = 1
 
 # Avg. chars per ASCII-whitespace token above which str.split() word counts
 # are no longer trustworthy (see _lacks_word_boundaries).
@@ -73,8 +77,12 @@ CHAPTER_LAST_STEP = "10"
 STALL_MINUTES = 30
 
 
-class RunError(Exception):
+class RunError(ValueError):
     pass
+
+
+def is_current_run(manifest: dict) -> bool:
+    return type(manifest.get("finalization_version")) is int and manifest["finalization_version"] == FINALIZATION_VERSION
 
 
 def _now() -> str:
@@ -123,6 +131,7 @@ def init_run(
 
     manifest = {
         "manifest_version": MANIFEST_VERSION,
+        "finalization_version": FINALIZATION_VERSION,
         "vault_tag": vault_tag,
         "profile": profile,
         "profile_steps": [str(s) for s in resolved.steps],
@@ -140,6 +149,7 @@ def init_run(
             "agents_spawned": 0,
         },
     }
+    manifest["profile_steps"] = _required_stage_ids(manifest, run_dir, vault.config_path)
     if session_id is not None:
         manifest["codex_session_id"] = session_id
     _save(vault, vault_tag, manifest)
@@ -235,16 +245,44 @@ def set_step(
     if status not in STEP_STATUSES:
         raise RunError(f"invalid step status '{status}' (one of {STEP_STATUSES})")
     manifest = load_manifest(vault, vault_tag)
-    entry = manifest["steps"].setdefault(str(step), {})
+    step = str(step)
+    current = is_current_run(manifest)
+    if chapter and current:
+        if _chapter_id_of(chapter) != chapter or "/" in chapter or "\\" in chapter or chapter in {".", ".."}:
+            raise RunError("invalid chapter id")
+        ch = manifest["chapters"].setdefault(chapter, {})
+        entry = ch.setdefault("steps", {}).setdefault(step, {})
+    else:
+        entry = manifest["steps"].setdefault(step, {})
+    previous = dict(entry)
     entry["status"] = status
     if status == "running" and "started_at" not in entry:
         entry["started_at"] = _now()
     if status in ("done", "skipped", "failed"):
-        entry["finished_at"] = _now()
+        entry["finished_at"] = previous.get("finished_at") if previous.get("status") == status else _now()
+    if current and status != "done":
+        entry.pop("completion", None)
     if chapter:
         entry["chapter"] = chapter
         ch = manifest["chapters"].setdefault(chapter, {})
         ch["status"] = f"step-{step}-{status}"
+    if current and status == "done" and not chapter and step in {"14.5", "15", "16"}:
+        try:
+            if step == "14.5":
+                completion = _initial_review(vault, manifest)
+            else:
+                _validate_initial_completion(vault, manifest)
+                if step == "16":
+                    _validate_edit_completion(vault, manifest, "15")
+                completion = {
+                    "inputs": _stage_inputs(vault, manifest, through=step),
+                    "report_revision": _file_revision(_report_path(vault, vault_tag)),
+                }
+            if previous.get("status") == "done" and previous.get("completion") != completion:
+                raise RunError(f"step {step} inputs changed; restart it with --status running before completing again")
+            entry["completion"] = completion
+        except (ValueError, OSError, UnicodeError) as exc:
+            raise RunError(f"step {step} completion rejected: {exc}") from exc
     _save(vault, vault_tag, manifest)
     record_event(vault, vault_tag, {"type": "step", "step": str(step), "status": status, "chapter": chapter})
     return manifest
@@ -280,6 +318,8 @@ def set_status(vault, vault_tag: str, status: str, blocked_on: str | None = None
     if status not in RUN_STATUSES:
         raise RunError(f"invalid run status '{status}' (one of {RUN_STATUSES})")
     manifest = load_manifest(vault, vault_tag)
+    if status == "done" and is_current_run(manifest):
+        raise RunError("only run finish may mark a current run done")
     manifest["status"] = status
     manifest["blocked_on"] = blocked_on if status == "blocked" else None
     _save(vault, vault_tag, manifest)
@@ -329,8 +369,11 @@ def resume_position(manifest: dict, required_steps: set[str] | None = None) -> d
         ordered = [s for s in profile_steps if s in required_steps]
         extra = sorted(required_steps - set(profile_steps), key=_step_sort_key)
         profile_steps = ordered + extra
+        if is_current_run(manifest):
+            profile_steps.sort(key=_step_sort_key)
     steps = manifest.get("steps", {})
-    done = [s for s in profile_steps if steps.get(s, {}).get("status") in ("done", "skipped")]
+    complete_statuses = ("done",) if is_current_run(manifest) else ("done", "skipped")
+    done = [s for s in profile_steps if steps.get(s, {}).get("status") in complete_statuses]
     remaining = [s for s in profile_steps if s not in done]
     chapter_done = ("done", f"step-{CHAPTER_LAST_STEP}-done")
     chapters = manifest.get("chapters")
@@ -340,6 +383,8 @@ def resume_position(manifest: dict, required_steps: set[str] | None = None) -> d
         name
         for name, ch in chapters.items()
         if not isinstance(ch, dict) or ch.get("status") not in chapter_done
+        or (is_current_run(manifest)
+            and any(ch.get("steps", {}).get(str(step), {}).get("status") != "done" for step in range(2, 11)))
     ]
     return {
         "next_step": remaining[0] if remaining else None,
@@ -365,8 +410,60 @@ def run_resume_position(vault, manifest: dict) -> dict:
     classified `light` resumes at step 10, not step 3.
     """
     run_dir = vault.run_dir(manifest["vault_tag"])
-    required = _required_step_ids(manifest, run_dir, vault.config_path)
-    return resume_position(manifest, required)
+    current = is_current_run(manifest)
+    required = set(_required_stage_ids(manifest, run_dir, vault.config_path)) if current else _required_step_ids(manifest, run_dir, vault.config_path)
+    position = resume_position(manifest, required)
+    if not current:
+        position.update({"action": "legacy-diagnostic", "approval_current": False})
+        return position
+    # Chapter steps do not complete a different chapter or the global stage 6.
+    if "1.5" in required:
+        position["remaining_steps"] = [step for step in position["remaining_steps"] if step not in {str(i) for i in range(2, 11)} or step == "6"]
+        position["next_step"] = position["remaining_steps"][0] if position["remaining_steps"] else None
+        position["chapters_ready"] = []
+        if position["next_step"] not in {"1", "1.5"}:
+            try:
+                plan = _chapter_plan(vault, manifest)
+            except (ValueError, OSError, UnicodeError, TypeError, KeyError):
+                position.update({"next_step": "1.5", "restart_required": True})
+            else:
+                pending = {}
+                for chapter in plan:
+                    progress = manifest["chapters"][chapter["id"]].get("steps", {})
+                    pending[chapter["id"]] = [step for step in map(str, range(2, 11)) if progress.get(step, {}).get("status") != "done"]
+                ready = [{"chapter": chapter["id"], "next_step": pending[chapter["id"]][0]}
+                         for chapter in plan if pending[chapter["id"]]
+                         and all(not pending[dep] for dep in chapter["depends_on"])]
+                position["chapters_ready"] = ready
+                if ready:
+                    position.update(ready[0])
+                elif any(pending.values()):
+                    position.update({"next_step": "1.5", "restart_required": True})
+    current_approval = manifest.get("status") == "done" and approval_current(vault, manifest)
+    if position["next_step"] is None and not current_approval:
+        for step in ("14.5", "15", "16"):
+            if step not in required:
+                continue
+            try:
+                if step == "14.5":
+                    _validate_initial_completion(vault, manifest)
+                else:
+                    _validate_edit_completion(vault, manifest, step, current_report=step == "16")
+            except (ValueError, OSError, UnicodeError, TypeError, KeyError):
+                position["next_step"] = step
+                position["restart_required"] = True
+                break
+    position["approval_current"] = current_approval
+    position["action"] = "complete" if current_approval else "step" if position["next_step"] else "final-audit"
+    if position["next_step"] is None and not current_approval:
+        try:
+            _validate_final_audit(vault, manifest)
+        except (ValueError, OSError, UnicodeError, TypeError, KeyError):
+            pass
+        else:
+            position["action"] = "finish"
+        position["command"] = f"citecheck extract {manifest['vault_tag']} --final --json" if position["action"] == "final-audit" else f"run finish {manifest['vault_tag']} --json"
+    return position
 
 
 def status_summary(vault, vault_tag: str, stall_minutes: int = STALL_MINUTES) -> dict:
@@ -374,6 +471,10 @@ def status_summary(vault, vault_tag: str, stall_minutes: int = STALL_MINUTES) ->
     manifest = load_manifest(vault, vault_tag)
     summary = dict(manifest)
     summary["resume"] = run_resume_position(vault, manifest)
+    summary["approval_current"] = manifest.get("status") == "done" and approval_current(vault, manifest)
+    summary["finalization_diagnostic"] = (
+        "current" if summary["approval_current"] else "unverified or stale; run resume for required action"
+    )
 
     possibly_stalled = False
     if manifest.get("status") == "running":
@@ -490,6 +591,479 @@ def _required_step_ids(manifest: dict, run_dir: Path, config_path: Path | None) 
         return steps
 
 
+def _required_stage_ids(manifest: dict, run_dir: Path, config_path: Path | None) -> list[str]:
+    """Existing fractional procedures, without widening Profile.steps' public schema."""
+    from hyperresearch.core.profiles import BUILTIN_PROFILES
+
+    steps = _required_step_ids(manifest, run_dir, config_path)
+    tier = _declared_tier(run_dir) or manifest.get("profile", "full")
+    # Recorded/configured lists may add work, but cannot waive a known tier's
+    # shipped route merely by deleting flags from its recovery manifest.
+    if tier in BUILTIN_PROFILES:
+        steps.update(str(step) for step in BUILTIN_PROFILES[tier]["steps"])
+    if {"12", "14"} <= steps or tier in {"full", "premier", "dissertation"}:
+        steps.add("14.5")
+    if tier == "dissertation":
+        steps.add("1.5")
+    return sorted(steps, key=_step_sort_key)
+
+
+def _report_path(vault, tag: str) -> Path:
+    return vault.notes_dir / f"final_report_{tag}.md"
+
+
+def _file_revision(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _digest(value: object) -> str:
+    return "sha256:" + hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def _read_json(path: Path):
+    return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def _records_shape(value, label: str) -> list[dict]:
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise RunError(f"{label} must be an array of objects")
+    return value
+
+
+def _required_text(record: dict, fields: tuple[str, ...], label: str) -> None:
+    if any(not isinstance(record.get(field), str) or not record[field].strip() for field in fields):
+        raise RunError(f"{label} requires text fields: {', '.join(fields)}")
+
+
+def _recommendation_records(payload, label: str) -> list[dict]:
+    records = _records_shape(payload if isinstance(payload, list) else payload.get("recommendations"), label)
+    categories = {"merge-paragraphs", "break-paragraph", "make-list", "make-table", "bold-keyterms", "split-sentence", "remove-hr", "add-whitespace"}
+    for record in records:
+        _required_text(record, ("id", "section", "rationale", "category", "severity"), label)
+        if (record.get("category") not in categories or record.get("severity") not in {"minor", "moderate", "major"}
+                or not isinstance(record.get("current"), str) or not isinstance(record.get("recommended"), str)):
+            raise RunError(f"{label} has malformed recommendation fields")
+    if isinstance(payload, dict) and "summary" in payload:
+        summary = payload["summary"]
+        if not isinstance(summary, dict) or type(summary.get("total_recommendations")) is not int or summary["total_recommendations"] != len(records):
+            raise RunError(f"{label} summary count differs from recommendations")
+    return records
+
+
+def _chapter_plan(vault, manifest: dict) -> list[dict]:
+    plan = _read_json(vault.run_dir(manifest["vault_tag"]) / "chapter-plan.json")
+    if not isinstance(plan, dict):
+        raise RunError("chapter-plan.json must be an object")
+    chapters = _records_shape(plan.get("chapters"), "chapter-plan chapters")
+    ids = [chapter.get("id") for chapter in chapters]
+    if not chapters or any(
+        _chapter_id_of(cid) != cid or not isinstance(cid, str)
+        or "/" in cid or "\\" in cid or cid in {".", ".."}
+        for cid in ids
+    ) or len(set(ids)) != len(ids):
+        raise RunError("chapter-plan must contain unique safe chapter ids")
+    if not isinstance(manifest.get("chapters"), dict) or set(ids) != set(manifest["chapters"]):
+        raise RunError("chapter-plan and registered chapter ids differ")
+    dependencies = {}
+    for chapter in chapters:
+        cid = chapter["id"]
+        deps = chapter.get("depends_on")
+        if (not isinstance(chapter.get("title"), str) or not chapter["title"].strip()
+                or not isinstance(chapter.get("atomic_items"), list)
+                or not isinstance(deps, list) or any(not isinstance(dep, str) or dep not in ids for dep in deps)
+                or len(set(deps)) != len(deps) or cid in deps):
+            raise RunError("chapter-plan has malformed chapter/dependencies")
+        dependencies[cid] = deps
+    visiting, visited = set(), set()
+
+    def visit(cid):
+        if cid in visiting:
+            raise RunError("chapter dependencies contain a cycle")
+        if cid not in visited:
+            visiting.add(cid)
+            for dep in dependencies[cid]:
+                visit(dep)
+            visiting.remove(cid)
+            visited.add(cid)
+
+    for cid in ids:
+        visit(cid)
+    return chapters
+
+
+# These are the shipped producer outputs, not a new workflow or evidence ledger.
+_STAGE_OUTPUTS = {
+    "1": {"query.md": "text", "scaffold.md": "text", "prompt-decomposition.json": "decomposition",
+          "temp/coverage-matrix.md": "text"},
+    "1.5": {"chapter-plan.json": "chapters"},
+    "3": {"temp/contradiction-graph.json": "records", "temp/consensus-claims.json": "records"},
+    "4": {"loci.json": "loci"},
+    "6": {"comparisons.md": "text"},
+    "7": {"temp/source-tensions.json": "tensions"},
+    "8": {"corpus-critic-gaps.json": "gaps", "temp/corpus-critic-results.md": "text"},
+    "9": {"temp/evidence-digest.md": "text"},
+    "11": {"temp/synthesis-plan.md": "text", "temp/synthesis-outline.md": "text", "temp/synthesis-pass1.md": "text"},
+    "12": {f"critic-findings-{role}.json": "findings" for role in ("dialectic", "depth", "width", "instruction")},
+    "13": {"temp/post-critic-fetch-log.md": "text"},
+    "14": {"patch-log.json": "patch"},
+    "14.5": {"cite-check-pairs.json": "pairs", "cite-check-findings.json": "citation-findings"},
+    "15": {"polish-log.json": "polish"},
+    "16": {"readability-recommendations.json": "recommendations", "readability-decisions.json": "decisions"},
+}
+
+
+def _output_specs(vault, manifest: dict, through: str | None = None) -> dict[str, str]:
+    stages = _required_stage_ids(manifest, vault.run_dir(manifest["vault_tag"]), vault.config_path)
+    if through is not None:
+        stages = [stage for stage in stages if _step_sort_key(stage) <= _step_sort_key(through)]
+    chaptered = "1.5" in stages
+    specs = {}
+    for stage in stages:
+        if not chaptered or stage not in {str(i) for i in range(2, 11)}:
+            specs.update(_STAGE_OUTPUTS.get(stage, {}))
+    if chaptered and (through is None or _step_sort_key(through) >= (6,)):
+        specs["comparisons.md"] = "text"  # the existing global step 6 output
+        for chapter in _chapter_plan(vault, manifest):
+            for stage in map(str, range(2, 11)):
+                for name, shape in _STAGE_OUTPUTS.get(stage, {}).items():
+                    specs[f"chapters/{chapter['id']}/{name}"] = shape
+            specs[f"chapters/{chapter['id']}/draft.md"] = "text"
+    elif "10" in stages and "11" in stages:
+        from hyperresearch.core.profiles import resolve_profile
+
+        profile = resolve_profile(manifest.get("profile", "full"), vault.config_path)
+        for angle in "abcdefghijklmnopqrstuvwxyz"[:profile.draft_count]:
+            specs[f"temp/draft-{angle}.md"] = "text"
+    if "14.5" in stages and (vault.run_dir(manifest["vault_tag"]) / "cite-check-patch-log.json").exists():
+        specs["cite-check-patch-log.json"] = "object"
+    return specs
+
+
+def _validate_output(path: Path, shape: str) -> None:
+    if shape == "text":
+        if not path.read_text(encoding="utf-8-sig").strip():
+            raise RunError(f"{path.name} must contain text")
+        return
+    payload = _read_json(path)
+    if shape == "records":
+        if path.name == "consensus-claims.json":
+            if not isinstance(payload, list) or any(
+                not ((isinstance(item, str) and item.strip()) or (isinstance(item, dict) and item))
+                for item in payload
+            ):
+                raise RunError("consensus claims must be an array of nonempty claim strings or objects")
+            return
+        records = _records_shape(payload, path.name)
+        if any(not item for item in records):
+            raise RunError(f"{path.name} contains empty records")
+        if path.name == "contradiction-graph.json":
+            for record in records:
+                _required_text(record, ("cluster_id", "fight", "evidence_quality_delta", "scope_overlap", "decision_relevance"), path.name)
+                for side in ("side_a", "side_b"):
+                    data = record.get(side)
+                    if not isinstance(data, dict):
+                        raise RunError("contradiction clusters require two sides")
+                    _required_text(data, ("position",), path.name)
+                    for field in ("claims", "sources"):
+                        if not isinstance(data.get(field), list) or any(not isinstance(item, str) for item in data[field]):
+                            raise RunError("contradiction side claims/sources must be string arrays")
+        return
+    if shape == "recommendations" and isinstance(payload, list):
+        _recommendation_records(payload, path.name)
+        return
+    if not isinstance(payload, dict):
+        raise RunError(f"{path.name} must be an object")
+    arrays = {"loci": ["loci"], "tensions": ["tensions"], "gaps": ["gaps"], "findings": ["findings"],
+              "patch": ["applied", "skipped", "conflicts", "orchestrator_escalated"],
+              "polish": ["applied", "escalations"], "chapters": ["chapters"],
+              "recommendations": ["recommendations"], "decisions": ["skipped", "edit_failures"]}
+    for key in arrays.get(shape, []):
+        _records_shape(payload.get(key), f"{path.name}.{key}")
+    if shape == "findings":
+        for record in payload["findings"]:
+            # The instruction critic has a separately documented structural-
+            # mirror record: empty location, no recommendation, and an explicit
+            # heading-index assignment for an orchestrator restructure.
+            atomic_item = record.get("atomic_item")
+            structural_mirror = (
+                path.name == "critic-findings-instruction.json"
+                and payload.get("critic_type", "instruction") == "instruction"
+                and record.get("severity") == "critical"
+                and record.get("failure_mode") == "wrong-order"
+                and record.get("location") == ""
+                and record.get("requires_orchestrator_restructure") is True
+                and isinstance(atomic_item, str)
+                and re.fullmatch(r"required_section_headings\[\d+\]:\s*\S.*", atomic_item) is not None
+            )
+            if structural_mirror:
+                _required_text(record, ("severity", "issue"), path.name)
+                if "recommendation" in record:
+                    _required_text(record, ("recommendation",), path.name)
+            else:
+                _required_text(record, ("severity", "location", "issue", "recommendation"), path.name)
+            if record.get("severity") not in {"critical", "major", "minor"}:
+                raise RunError(f"{path.name} has invalid finding severity")
+    elif shape == "loci":
+        for record in payload["loci"]:
+            _required_text(record, ("name", "one_line", "rationale", "flavor"), path.name)
+            score_fields = ("importance", "uncertainty", "disagreement", "decision_impact", "composite_score")
+            finite_scores = all(type(record.get(field)) is int or (
+                type(record.get(field)) is float and math.isfinite(record[field])
+            ) for field in score_fields)
+            if (record.get("flavor") not in {"dialectical", "synthesis", "technical"}
+                    or not finite_scores or type(record.get("source_budget")) is not int):
+                raise RunError(f"{path.name} requires finite numeric scores, integer source_budget and a known flavor")
+    elif shape == "gaps":
+        for record in payload["gaps"]:
+            _required_text(record, ("id", "type", "priority"), path.name)
+    elif shape == "tensions":
+        for record in payload["tensions"]:
+            _required_text(record, ("name", "resolution", "origin", "decision_relevance"), path.name)
+            for side in ("side_a", "side_b"):
+                data = record.get(side)
+                if not isinstance(data, dict):
+                    raise RunError(f"{path.name} requires two tension sides")
+                _required_text(data, ("position", "evidence"), path.name)
+                if not isinstance(data.get("proponents"), list) or any(not isinstance(item, str) for item in data["proponents"]):
+                    raise RunError(f"{path.name} proponents must be an array of note ids")
+    elif shape == "polish":
+        for record in payload["applied"]:
+            _required_text(record, ("category", "description"), path.name)
+            if type(record.get("chars_removed")) is not int:
+                raise RunError("polish applied record requires integer chars_removed")
+        for record in payload["escalations"]:
+            _required_text(record, ("category", "issue"), path.name)
+    elif shape == "recommendations":
+        _recommendation_records(payload, path.name)
+    elif shape == "decisions":
+        for field in ("skipped", "edit_failures"):
+            for record in payload[field]:
+                _required_text(record, ("id", "reason"), path.name)
+    if shape == "patch" and (type(payload.get("total_findings")) is not int or payload["total_findings"] < 0):
+        raise RunError("patch-log.total_findings must be a nonnegative integer")
+    if shape == "decomposition":
+        _required_text(payload, ("pipeline_tier",), path.name)
+        if payload.get("pipeline_tier") not in {"light", "full", "premier", "dissertation"}:
+            raise RunError("decomposition must declare a supported pipeline_tier")
+        if not isinstance(payload.get("required_section_headings", []), list):
+            raise RunError("required_section_headings must be an array")
+    if shape == "decisions" and (type(payload.get("total_recommendations")) is not int
+                or not isinstance(payload.get("applied"), list)
+                or any(not isinstance(item, str) for item in payload["applied"])
+                or type(payload.get("net_char_delta_actual")) is not int):
+        raise RunError("readability decisions have invalid counts/IDs")
+    if shape == "pairs":
+        from hyperresearch.core.citation_contracts import parse_pairs
+
+        parse_pairs(payload)
+    if shape == "citation-findings":
+        from hyperresearch.core.citation_contracts import parse_findings
+
+        if parse_findings(payload).legacy:
+            raise RunError("current initial citation evidence must be versioned")
+
+
+def _step_state(manifest: dict) -> dict:
+    def state(entry):
+        if not isinstance(entry, dict):
+            raise RunError("stage entries must be objects")
+        return {key: entry[key] for key in ("status", "started_at", "finished_at") if key in entry}
+
+    if not isinstance(manifest.get("steps"), dict) or not isinstance(manifest.get("chapters"), dict):
+        raise RunError("manifest steps/chapters must be objects")
+    if any(not isinstance(chapter, dict) or not isinstance(chapter.get("steps", {}), dict) for chapter in manifest["chapters"].values()):
+        raise RunError("chapter progress must be an object of stage entries")
+
+    return {
+        "profile": manifest.get("profile"), "profile_steps": manifest.get("profile_steps"),
+        "steps": {key: state(value) for key, value in manifest.get("steps", {}).items()},
+        "chapters": {key: {"title": value.get("title"), "steps": {
+            step: state(entry) for step, entry in value.get("steps", {}).items()
+        }} for key, value in manifest.get("chapters", {}).items()},
+    }
+
+
+def _stage_inputs(vault, manifest: dict, through: str | None = None) -> dict:
+    run_dir = vault.run_dir(manifest["vault_tag"])
+    stages = _required_stage_ids(manifest, run_dir, vault.config_path)
+    stages = [stage for stage in stages if through is None or _step_sort_key(stage) <= _step_sort_key(through)]
+    chaptered = "1.5" in stages
+    global_stages = [stage for stage in stages if not chaptered or stage not in {str(i) for i in range(2, 11)} or stage == "6"]
+    for stage in global_stages:
+        if manifest.get("steps", {}).get(stage, {}).get("status") != "done":
+            raise RunError(f"required stage {stage} is not done")
+    if chaptered:
+        chapters = _chapter_plan(vault, manifest)
+        if through is None or _step_sort_key(through) >= (6,):
+            for chapter in chapters:
+                progress = manifest["chapters"][chapter["id"]].get("steps", {})
+                for stage in map(str, range(2, 11)):
+                    if progress.get(stage, {}).get("status") != "done":
+                        raise RunError(f"chapter {chapter['id']} stage {stage} is not done")
+                for dependency in chapter["depends_on"]:
+                    dep = manifest["chapters"][dependency]["steps"]["10"]
+                    first = progress.get("2", {})
+                    if not dep.get("finished_at") or not first.get("finished_at") or dep["finished_at"] > first.get("started_at", first["finished_at"]):
+                        raise RunError(f"chapter {chapter['id']} started before dependency {dependency} completed")
+    revisions = {}
+    for name, shape in _output_specs(vault, manifest, through).items():
+        path = run_dir / name
+        if not path.resolve().is_relative_to(run_dir.resolve()):
+            raise RunError(f"output path escapes run directory: {name}")
+        _validate_output(path, shape)
+        revisions[name] = _file_revision(path)
+    if "16" in stages:
+        recs = _read_json(run_dir / "readability-recommendations.json")
+        recs = recs if isinstance(recs, list) else recs["recommendations"]
+        ids = [rec.get("id") for rec in recs]
+        decisions = _read_json(run_dir / "readability-decisions.json")
+        handled = decisions["applied"] + [rec.get("id") for field in ("skipped", "edit_failures") for rec in decisions[field]]
+        if (any(not isinstance(identity, str) or not identity for identity in ids)
+                or any(not isinstance(identity, str) or not identity for identity in handled)
+                or len(set(ids)) != len(ids) or len(set(handled)) != len(handled)
+                or set(ids) != set(handled) or decisions["total_recommendations"] != len(ids)):
+            raise RunError("readability decisions must account for each recommendation exactly once")
+    state = _step_state(manifest)
+    state["steps"] = {key: value for key, value in state["steps"].items() if key in stages}
+    return {"stages": state, "outputs": revisions}
+
+
+def _initial_artifacts(vault, manifest: dict) -> dict:
+    run_dir = vault.run_dir(manifest["vault_tag"])
+    names = ["cite-check-pairs.json", "cite-check-findings.json"]
+    if (run_dir / "cite-check-patch-log.json").exists():
+        names.append("cite-check-patch-log.json")
+    return {name: _file_revision(run_dir / name) for name in names}
+
+
+def _initial_review(vault, manifest: dict) -> dict:
+    from hyperresearch.core.citation_contracts import (
+        parse_findings,
+        validate_coverage,
+        validate_resolutions,
+    )
+
+    run_dir = vault.run_dir(manifest["vault_tag"])
+    # Every required earlier stage/output must exist, while children remain parallel within their stages.
+    stages = _stage_inputs(vault, manifest, through="14")
+    pairs = _read_json(run_dir / "cite-check-pairs.json")
+    payload = _read_json(run_dir / "cite-check-findings.json")
+    validate_coverage(pairs, payload, vault)
+    findings = parse_findings(payload)
+    revision = _file_revision(_report_path(vault, manifest["vault_tag"]))
+    log = run_dir / "cite-check-patch-log.json"
+    if any(item["severity"] == "critical" for item in findings.findings) or log.exists():
+        validate_resolutions(findings, _read_json(log), revision)
+    elif pairs["report_revision"] != revision:
+        raise RunError("initial audit report changed without a bound reviewed resolution")
+    return {"report_revision": revision, "artifacts": _initial_artifacts(vault, manifest), "inputs": stages,
+            "sources": [pair.get("source_input") for pair in pairs["pairs"] if pair["note_id"] is not None]}
+
+
+def _validate_initial_completion(vault, manifest: dict) -> None:
+    stages = _required_stage_ids(manifest, vault.run_dir(manifest["vault_tag"]), vault.config_path)
+    if "14.5" not in stages:
+        return
+    entry = manifest.get("steps", {}).get("14.5", {})
+    completion = entry.get("completion")
+    if (entry.get("status") != "done" or not isinstance(completion, dict)
+            or completion.get("artifacts") != _initial_artifacts(vault, manifest)
+            or completion.get("inputs") != _stage_inputs(vault, manifest, through="14")):
+        raise RunError("initial stage 14.5 review is missing or changed since completion")
+
+
+def _validate_edit_completion(vault, manifest: dict, step: str, *, current_report: bool = False) -> None:
+    entry = manifest.get("steps", {}).get(step, {})
+    completion = entry.get("completion")
+    if (entry.get("status") != "done" or not isinstance(completion, dict)
+            or completion.get("inputs") != _stage_inputs(vault, manifest, through=step)):
+        raise RunError(f"stage {step} completion inputs changed; restart final editing")
+    if current_report and completion.get("report_revision") != _file_revision(_report_path(vault, manifest["vault_tag"])):
+        raise RunError(f"report changed after stage {step}; restart final editing before final audit")
+
+
+def finalization_inputs(vault, vault_tag: str) -> dict:
+    """Inputs permitted for FINAL extraction, after all final edits and outputs."""
+    manifest = load_manifest(vault, vault_tag)
+    if not is_current_run(manifest):
+        raise RunError("legacy/unknown finalization contract: read-only diagnostic, current approval unavailable")
+    _validate_initial_completion(vault, manifest)
+    _validate_edit_completion(vault, manifest, "15")
+    _validate_edit_completion(vault, manifest, "16", current_report=True)
+    inputs = {"finalization_version": FINALIZATION_VERSION, "vault_tag": vault_tag,
+              "report_revision": _file_revision(_report_path(vault, vault_tag)),
+              **_stage_inputs(vault, manifest)}
+    return {**inputs, "input_digest": _digest(inputs)}
+
+
+def _verification_inputs(vault, manifest: dict) -> dict:
+    """Stable inputs only: exclude status, heartbeat, spend, and the receipt itself."""
+    from hyperresearch.cli.lint import _check_quote_integrity, _check_retracted_citations
+    from hyperresearch.core.citation_contracts import source_input
+    from hyperresearch.core.citecheck import extract_pairs
+    from hyperresearch.core.profiles import resolve_profile
+
+    run_dir = vault.run_dir(manifest["vault_tag"])
+    report = _report_path(vault, manifest["vault_tag"])
+    raw = report.read_bytes() if report.exists() else b""
+    pairs = extract_pairs(raw.decode("utf-8-sig"), vault.db)
+    sources = {pair["note_id"]: source_input(vault, pair["note_id"])[0] for pair in pairs if pair["note_id"] is not None}
+    names = set(_output_specs(vault, manifest)) | {"final-cite-check-pairs.json", "final-cite-check-findings.json", "final-cite-check-patch-log.json"}
+    text = raw.decode("utf-8-sig")
+    lint_outcomes = {
+        "quote-integrity": _check_quote_integrity(vault, vault.db, report, text),
+        "retracted-citations": _check_retracted_citations(vault, vault.db, report, text),
+    }
+    return {"finalization_version": manifest.get("finalization_version"), "vault_tag": manifest["vault_tag"],
+            "codex_session_id": manifest.get("codex_session_id"), "stages": _step_state(manifest),
+            "completions": {key: value.get("completion") for key, value in manifest.get("steps", {}).items() if key in {"14.5", "15", "16"}},
+            "report_revision": "sha256:" + hashlib.sha256(raw).hexdigest(),
+            "outputs": {name: _file_revision(run_dir / name) if (run_dir / name).exists() else None for name in sorted(names)},
+            "extracted_pairs": pairs, "sources": sources,
+            "profile": resolve_profile(manifest.get("profile", "full"), vault.config_path).model_dump(),
+            "config_revision": _file_revision(vault.config_path) if vault.config_path.exists() else None,
+            "blocking_lint_outcomes": lint_outcomes}
+
+
+def approval_current(vault, manifest: dict) -> bool:
+    if not is_current_run(manifest):
+        return False
+    receipt = manifest.get("verify", {})
+    try:
+        return (receipt.get("passed") is True and receipt.get("input_digest") == _digest(_verification_inputs(vault, manifest)))
+    except (ValueError, OSError, UnicodeError, TypeError, KeyError):
+        return False
+
+
+def _validate_final_audit(vault, manifest: dict) -> dict:
+    from hyperresearch.core.citation_contracts import parse_findings, validate_coverage
+    from hyperresearch.core.citecheck import extract_pairs
+
+    run_dir = vault.run_dir(manifest["vault_tag"])
+    inputs = finalization_inputs(vault, manifest["vault_tag"])
+    pairs = _read_json(run_dir / "final-cite-check-pairs.json")
+    findings = _read_json(run_dir / "final-cite-check-findings.json")
+    if not isinstance(pairs, dict) or pairs.get("finalization_inputs") != inputs:
+        raise RunError("final citation extraction inputs are missing or stale")
+    report = _report_path(vault, manifest["vault_tag"])
+    if pairs.get("report_revision") != inputs["report_revision"]:
+        raise RunError("final citation report revision is stale")
+    actual = extract_pairs(report.read_bytes().decode("utf-8-sig"), vault.db, revision=inputs["report_revision"])
+    keys = ("pair_index", "pair_id", "finding_id", "sentence", "note_id", "citation", "numbers", "strong")
+    def projection(records):
+        if any(not isinstance(pair, dict) for pair in records):
+            raise RunError("final pairs must be objects")
+        return [{key: pair.get(key) for key in keys} for pair in records]
+    if not isinstance(pairs.get("pairs"), list) or projection(pairs["pairs"]) != projection(actual):
+        raise RunError("final pairs differ from actual report extraction; citation occurrences were dropped or changed")
+    coverage = validate_coverage(pairs, findings, vault)
+    if any(item["severity"] == "critical" for item in parse_findings(findings).findings):
+        raise RunError("current final critical findings require correction and fresh extraction/results; a resolution log cannot clear them")
+    return coverage
+
+
 def verify_run(vault, vault_tag: str) -> dict:
     """Structural verification battery for a completed run.
 
@@ -509,7 +1083,17 @@ def verify_run(vault, vault_tag: str) -> dict:
     def check(name: str, ok: bool, detail: str) -> None:
         checks.append({"name": name, "ok": bool(ok), "detail": detail})
 
-    report_path = vault.root / "research" / "notes" / f"final_report_{vault_tag}.md"
+    current_contract = is_current_run(manifest)
+    inputs_before = None
+    if current_contract:
+        try:
+            inputs_before = _verification_inputs(vault, manifest)
+        except (ValueError, OSError, UnicodeError, TypeError, KeyError) as exc:
+            check("verification-inputs", False, str(exc))
+    elif "finalization_version" in manifest:
+        check("finalization-version", False, "unsupported finalization contract; read-only diagnostic")
+
+    report_path = _report_path(vault, vault_tag)
     check("report-exists", report_path.exists(), str(report_path))
 
     report_text = ""
@@ -523,10 +1107,15 @@ def verify_run(vault, vault_tag: str) -> dict:
         if decomp_path.exists():
             try:
                 decomp = json.loads(decomp_path.read_text(encoding="utf-8-sig"))
+                if not isinstance(decomp, dict):
+                    raise ValueError("decomposition must be an object")
                 response_format = decomp.get("response_format")
                 required_headings = decomp.get("required_section_headings", []) or []
+                if not isinstance(required_headings, list) or any(not isinstance(h, str) for h in required_headings):
+                    raise ValueError("required_section_headings must be strings")
                 declares_levers = bool(decomp.get("levers"))
-            except json.JSONDecodeError:
+            except (ValueError, OSError, UnicodeError):
+                required_headings = []
                 check("decomposition-readable", False, "prompt-decomposition.json is not valid JSON")
 
         # Runs that declared levers must have rendered the shim files the
@@ -619,35 +1208,40 @@ def verify_run(vault, vault_tag: str) -> dict:
             "scaffold gospel header must not ship",
         )
 
-        # Content gates: the blocking lint rules run in-process, so this ONE
-        # command carries the whole ship verdict. Bench Q62 shipped with 24
-        # hallucinated-quote errors because the orchestrator ran the lint
-        # separately and re-interpreted the failures as false positives —
-        # folding the rules in here removes that seam.
-        try:
-            from hyperresearch.cli.lint import (
-                _check_quote_integrity,
-                _check_retracted_citations,
-            )
-
-            for rule, fn in (
-                ("quote-integrity", _check_quote_integrity),
-                ("retracted-citations", _check_retracted_citations),
-            ):
-                errors = [
-                    i for i in fn(vault, vault.db, report_path, report_text)
-                    if i.get("severity") == "error"
-                ]
-                check(
-                    rule,
-                    not errors,
-                    "clean" if not errors else (
-                        f"{len(errors)} error(s) — first: "
-                        f"{errors[0].get('message', '')[:160]}"
-                    ),
+        if current_contract:
+            # Content gates: the blocking lint rules run in-process, so this ONE
+            # command carries the whole ship verdict. Bench Q62 shipped with 24
+            # hallucinated-quote errors because the orchestrator ran the lint
+            # separately and re-interpreted the failures as false positives —
+            # folding the rules in here removes that seam.
+            try:
+                from hyperresearch.cli.lint import (
+                    _check_quote_integrity,
+                    _check_retracted_citations,
                 )
-        except Exception as exc:
-            check("content-lints", False, f"content lint rules failed to run: {exc}")
+
+                for rule, fn in (
+                    ("quote-integrity", _check_quote_integrity),
+                    ("retracted-citations", _check_retracted_citations),
+                ):
+                    errors = [
+                        i for i in fn(vault, vault.db, report_path, report_text)
+                        if i.get("severity") == "error"
+                    ]
+                    check(
+                        rule,
+                        not errors,
+                        "clean" if not errors else (
+                            f"{len(errors)} error(s) — first: "
+                            f"{errors[0].get('message', '')[:160]}"
+                        ),
+                    )
+            except Exception as exc:
+                check("content-lints", False, f"content lint rules failed to run: {exc}")
+
+    if not current_contract:
+        for rule in ("quote-integrity", "retracted-citations"):
+            check(rule, False, "unavailable/unverified: legacy or unknown finalization contract; database-backed lint omitted and database left unopened")
 
     # Tier-mandated artifacts, keyed on the tier the run actually ran (see
     # _required_step_ids) rather than the profile it was initialized with.
@@ -666,14 +1260,13 @@ def verify_run(vault, vault_tag: str) -> dict:
     # Cite-check (step 14.5): explicit schema, original pair identity, and
     # reviewed critical resolution. Stage dependencies/final audit are separate.
     cc_findings = run_dir / "cite-check-findings.json"
-    if manifest.get("steps", {}).get("14.5", {}).get("status") == "done":
+    if not current_contract and manifest.get("steps", {}).get("14.5", {}).get("status") == "done":
         from hyperresearch.core.citation_contracts import (
             CitationContractError,
             bind_findings,
             parse_findings,
             parse_pairs,
             report_revision,
-            validate_coverage,
             validate_resolutions,
         )
 
@@ -700,28 +1293,31 @@ def verify_run(vault, vault_tag: str) -> dict:
                         report_revision(report_path.read_bytes()),
                     )
                 ok = True
-                detail = f"valid v1 findings; {len(criticals)} critical finding(s) reviewed and resolved"
+                detail = f"file-only v1 contract: {len(criticals)} critical resolution record(s) bound to report bytes; source-body review unverified"
         except (CitationContractError, OSError, UnicodeError, json.JSONDecodeError) as exc:
             ok = False
             detail = f"citation artifacts invalid/unverified: {exc}"
         check("cite-check-resolved", ok, detail)
-        try:
-            coverage = validate_coverage(
-                json.loads((run_dir / "cite-check-pairs.json").read_text(encoding="utf-8-sig")),
-                json.loads(cc_findings.read_text(encoding="utf-8-sig")), vault,
-            )
-            coverage_ok = True
-            coverage_detail = (
-                f"{coverage['coverage_mode']} coverage; {coverage['reviewed']}/{coverage['selected']} "
-                f"selected pairs reviewed; {coverage['unreviewed']} unreviewed; "
-                f"{coverage['dangling']} dangling occurrences accounted for"
-            )
-        except (CitationContractError, OSError, UnicodeError, json.JSONDecodeError) as exc:
-            coverage_ok = False
-            coverage_detail = f"citation coverage invalid/unverified: {exc}"
-        check("cite-check-coverage", coverage_ok, coverage_detail)
+        check("cite-check-coverage", False,
+              "unavailable/unverified: legacy or unknown finalization contract; source-body coverage requires database access, which is omitted")
 
-    return {"vault_tag": vault_tag, "passed": all(c["ok"] for c in checks), "checks": checks}
+    if current_contract:
+        try:
+            coverage = _validate_final_audit(vault, manifest)
+            check("finalization", True, f"final {coverage['coverage_mode']} audit: {coverage['reviewed']}/{coverage['selected']} selected; {coverage['unreviewed']} explicitly unreviewed")
+        except (ValueError, OSError, UnicodeError, TypeError, KeyError) as exc:
+            check("finalization", False, str(exc))
+        try:
+            unchanged = inputs_before is not None and inputs_before == _verification_inputs(vault, load_manifest(vault, vault_tag))
+        except (ValueError, OSError, UnicodeError, TypeError, KeyError):
+            unchanged = False
+        check("verification-inputs-stable", unchanged, "exact inputs unchanged across verification" if unchanged else "inputs changed during verification or were unreadable")
+    result = {"vault_tag": vault_tag, "passed": all(c["ok"] for c in checks), "checks": checks,
+              "diagnostic_only": not current_contract}
+    if inputs_before is not None:
+        result["inputs"] = inputs_before
+        result["input_digest"] = _digest(inputs_before)
+    return result
 
 
 def finish_run(vault, vault_tag: str) -> dict:
@@ -736,10 +1332,32 @@ def finish_run(vault, vault_tag: str) -> dict:
     """
     result = verify_run(vault, vault_tag)
     manifest = load_manifest(vault, vault_tag)
+    if not is_current_run(manifest):
+        result["passed"] = False
+        result["checks"].append({"name": "finalization-version", "ok": False,
+                                 "detail": "legacy/unknown run: read-only diagnostic; no current finish approval"})
+        return {"manifest": manifest, "verify": result}
+
+    def stable():
+        try:
+            return result.get("input_digest") == _digest(_verification_inputs(vault, load_manifest(vault, vault_tag)))
+        except (ValueError, OSError, UnicodeError, TypeError, KeyError):
+            return False
+
+    def mutation():
+        result["passed"] = False
+        result["checks"].append({"name": "finish-inputs-stable", "ok": False,
+                                 "detail": "inputs changed during finish verification/persistence; approval rejected"})
+
+    if result["passed"] and not stable():
+        mutation()
     manifest["verify"] = {
         "passed": result["passed"],
         "at": _now(),
         "failed_checks": [c["name"] for c in result["checks"] if not c["ok"]],
+        "finalization_version": FINALIZATION_VERSION,
+        "input_digest": result.get("input_digest"),
+        "inputs": result.get("inputs"),
     }
     if result["passed"]:
         manifest["status"] = "done"
@@ -748,9 +1366,27 @@ def finish_run(vault, vault_tag: str) -> dict:
         manifest["status"] = "blocked"
         manifest["blocked_on"] = "verify"
     _save(vault, vault_tag, manifest)
+    if result["passed"] and not stable():
+        mutation()
+        manifest = load_manifest(vault, vault_tag)
+        manifest["status"], manifest["blocked_on"] = "blocked", "verify"
+        manifest["verify"]["passed"] = False
+        manifest["verify"]["failed_checks"] = [c["name"] for c in result["checks"] if not c["ok"]]
+        _save(vault, vault_tag, manifest)
     record_event(vault, vault_tag, {
         "type": "finish",
         "passed": result["passed"],
         "failed_checks": manifest["verify"]["failed_checks"],
     })
+    if result["passed"] and not stable():
+        mutation()
+        manifest = load_manifest(vault, vault_tag)
+        manifest["status"], manifest["blocked_on"] = "blocked", "verify"
+        manifest["verify"]["passed"] = False
+        manifest["verify"]["failed_checks"] = [c["name"] for c in result["checks"] if not c["ok"]]
+        _save(vault, vault_tag, manifest)
+        record_event(vault, vault_tag, {
+            "type": "finish", "passed": False, "invalidated": True,
+            "failed_checks": manifest["verify"]["failed_checks"],
+        })
     return {"manifest": manifest, "verify": result}

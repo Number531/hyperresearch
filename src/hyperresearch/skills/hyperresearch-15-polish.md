@@ -1,13 +1,13 @@
 ---
 name: hyperresearch-15-polish
 description: >
-  Step 15 (final) of the hyperresearch V8 pipeline. Spawns the
+  Step 15 of the hyperresearch V8 pipeline. Spawns the
   hyperresearch-polish-auditor subagent (<% if platform == "codex" %>read + patch only<% else %>TOOL-LOCKED to Read + Edit<% endif %>) for
   the final hygiene + readability pass. Strips pipeline-reference leaks,
   YAML frontmatter, scaffold sections, filler phrases, run-on sentences.
   Escalates structural mismatches rather than fabricating content.
   Invoked via <% if platform == "codex" %>step-file read<% else %>Skill tool<% endif %> from the entry skill. Followed by step 16
-  (readability audit) which is the actual final step before ship.
+  (readability audit) which completes final edits before the separate final citation audit and finish.
 ---
 
 # Step 15 — Polish audit
@@ -50,12 +50,14 @@ prompt: |
   QUERY FILE: research/runs/<vault_tag>/query.md
 
   PIPELINE POSITION: You are step 15 (polish auditor) of the
-  hyperresearch V8 pipeline — the final step. Step 14 (patcher) applied
+  hyperresearch V8 pipeline — the polish stage. Full/premier/dissertation
+  completed initial citation review (14.5) after patching; light uses its
+  single draft and skips that initial review group. Step 14 (when required) applied
 <% if platform == "codex" %>  critic findings as patch hunks. After you return, the orchestrator
-  runs the final integrity gate and ships. You only read files and
+  continues through readability (16), separate final citation review, and the finish gate. You only read files and
   apply surgical patches (apply_patch) — never create or rewrite a file.
 <% else %>  critic findings as Edit hunks. After you return, the orchestrator
-  runs the final integrity gate and ships. You are TOOL-LOCKED to
+  continues through readability (16), separate final citation review, and the finish gate. You are TOOL-LOCKED to
   [Read, Edit].
 <% endif %>
   YOUR INPUTS:
@@ -88,7 +90,7 @@ If the escalation names a structural issue (e.g., "user asked for a ranked list;
 
 ## Step 15.4 — Final integrity gate
 
-Before declaring the run complete, verify every expected pipeline artifact exists. **The required set depends on the tier:**
+Before completing polish, inspect the following review-group outputs. The native final gate also validates the tier's other named stage outputs and completion flags. **This review-group set depends on the tier:**
 
 - **light tier:** only `research/runs/<vault_tag>/polish-log.json` is required (steps 12–14 are skipped, so no critic findings or patch log).
 - **full tier:** require all four critic findings + patch-log + polish-log:
@@ -104,7 +106,7 @@ for f in research/runs/<vault_tag>/critic-findings-dialectic.json \
 done
 ```
 
-If any artifact is missing, the responsible step failed silently. Re-spawn the responsible agent ONCE with the missing output path as its explicit required output. If it fails a second time, write a minimal stub (`{"findings":[]}` for critic files, canonical empty-log schema for patch-log.json / polish-log.json) and log the failure in the run log before proceeding.
+If any artifact is missing, the responsible step failed silently. Re-spawn the responsible agent ONCE with the missing output path as its explicit required output. If it fails again, leave the run blocked and report the missing work. Do not fabricate empty findings/logs for failed producer work. A valid zero-findings output must reflect completed work.
 
 ---
 
@@ -141,7 +143,7 @@ If any artifact is missing, the responsible step failed silently. Re-spawn the r
 
 ---
 
-## Step 15.6 — Ship
+## Step 15.6 — Complete polish before readability
 
 The final report lives at `research/notes/final_report_<vault_tag>.md`. The wrapper's required save path (if any) is a separate copy — handle per the wrapper contract.
 
@@ -150,9 +152,10 @@ The final report lives at `research/notes/final_report_<vault_tag>.md`. The wrap
 ## Exit criterion
 
 - `research/runs/<vault_tag>/polish-log.json` populated
-- Final integrity gate passed (or stub-filled with documented failure)
+- Required prior work and real output schemas are valid; no fabricated stubs
 - Lint gate passed
-- `research/notes/final_report_<vault_tag>.md` is the final, shippable artifact
+- Record `{hpr_path} run step <vault_tag> 15 --status done -j` after polish. Full/premier/dissertation require completed initial 14.5 review first.
+- Continue to step 16, then the separate final citation audit and `run finish`; polish alone does not ship.
 
 ---
 
@@ -166,4 +169,4 @@ Return to the entry skill (`hyperresearch`). Invoke step 16:
 <% if platform == "codex" %>cat .hyperresearch/codex/steps/hyperresearch-16-readability-audit.md<% else %>Skill(skill: "hyperresearch-16-readability-audit")<% endif %>
 ```
 
-Step 16 is the final step — readability audit + selective apply. Runs for ALL tiers.
+Step 16 completes readability + selective apply for ALL tiers; a separate final citation audit and finish gate follow.
