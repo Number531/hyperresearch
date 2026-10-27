@@ -58,3 +58,11 @@ P0-REGRESSION passed (50.716s), P0-LINT passed (0.189s). No new targeted
 failures against the clean phase baseline. Earlier successful candidate
 checks and original failures remain retained. Independent phase audit follows
 the normal local implementation checkpoint; P1 cannot begin until it clears.
+
+P0 checkpoint: `6a34f5d4849381632b79f8c24f98ee43e9759ac6`.
+Fresh auditor `semantic_p0_phase_audit` reviewed that range, source, prompts,
+tests and original red/final results; zero critical/major/minor findings.
+Its independent test selection ran on the clean checkpoint: 28 passed,
+exit 0 in 3.228s (`checks/P0/audit/INDEPENDENT-PROBES/output.log`). The parent
+reconciled that result and accepted P0. No semantic truth or producer
+independence is certified. P1/P2 were explicitly excluded from this audit.
