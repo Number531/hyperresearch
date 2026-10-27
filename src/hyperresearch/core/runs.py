@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -781,15 +783,38 @@ def _validate_output(path: Path, shape: str) -> None:
         _records_shape(payload.get(key), f"{path.name}.{key}")
     if shape == "findings":
         for record in payload["findings"]:
-            _required_text(record, ("severity", "location", "issue", "recommendation"), path.name)
+            # The instruction critic has a separately documented structural-
+            # mirror record: empty location, no recommendation, and an explicit
+            # heading-index assignment for an orchestrator restructure.
+            atomic_item = record.get("atomic_item")
+            structural_mirror = (
+                path.name == "critic-findings-instruction.json"
+                and payload.get("critic_type", "instruction") == "instruction"
+                and record.get("severity") == "critical"
+                and record.get("failure_mode") == "wrong-order"
+                and record.get("location") == ""
+                and record.get("requires_orchestrator_restructure") is True
+                and isinstance(atomic_item, str)
+                and re.fullmatch(r"required_section_headings\[\d+\]:\s*\S.*", atomic_item) is not None
+            )
+            if structural_mirror:
+                _required_text(record, ("severity", "issue"), path.name)
+                if "recommendation" in record:
+                    _required_text(record, ("recommendation",), path.name)
+            else:
+                _required_text(record, ("severity", "location", "issue", "recommendation"), path.name)
             if record.get("severity") not in {"critical", "major", "minor"}:
                 raise RunError(f"{path.name} has invalid finding severity")
     elif shape == "loci":
         for record in payload["loci"]:
             _required_text(record, ("name", "one_line", "rationale", "flavor"), path.name)
+            score_fields = ("importance", "uncertainty", "disagreement", "decision_impact", "composite_score")
+            finite_scores = all(type(record.get(field)) is int or (
+                type(record.get(field)) is float and math.isfinite(record[field])
+            ) for field in score_fields)
             if (record.get("flavor") not in {"dialectical", "synthesis", "technical"}
-                    or any(type(record.get(field)) is not int for field in ("importance", "uncertainty", "disagreement", "decision_impact", "composite_score", "source_budget"))):
-                raise RunError(f"{path.name} has invalid locus scores/flavor")
+                    or not finite_scores or type(record.get("source_budget")) is not int):
+                raise RunError(f"{path.name} requires finite numeric scores, integer source_budget and a known flavor")
     elif shape == "gaps":
         for record in payload["gaps"]:
             _required_text(record, ("id", "type", "priority"), path.name)
@@ -1183,35 +1208,40 @@ def verify_run(vault, vault_tag: str) -> dict:
             "scaffold gospel header must not ship",
         )
 
-        # Content gates: the blocking lint rules run in-process, so this ONE
-        # command carries the whole ship verdict. Bench Q62 shipped with 24
-        # hallucinated-quote errors because the orchestrator ran the lint
-        # separately and re-interpreted the failures as false positives —
-        # folding the rules in here removes that seam.
-        try:
-            from hyperresearch.cli.lint import (
-                _check_quote_integrity,
-                _check_retracted_citations,
-            )
-
-            for rule, fn in (
-                ("quote-integrity", _check_quote_integrity),
-                ("retracted-citations", _check_retracted_citations),
-            ):
-                errors = [
-                    i for i in fn(vault, vault.db, report_path, report_text)
-                    if i.get("severity") == "error"
-                ]
-                check(
-                    rule,
-                    not errors,
-                    "clean" if not errors else (
-                        f"{len(errors)} error(s) — first: "
-                        f"{errors[0].get('message', '')[:160]}"
-                    ),
+        if current_contract:
+            # Content gates: the blocking lint rules run in-process, so this ONE
+            # command carries the whole ship verdict. Bench Q62 shipped with 24
+            # hallucinated-quote errors because the orchestrator ran the lint
+            # separately and re-interpreted the failures as false positives —
+            # folding the rules in here removes that seam.
+            try:
+                from hyperresearch.cli.lint import (
+                    _check_quote_integrity,
+                    _check_retracted_citations,
                 )
-        except Exception as exc:
-            check("content-lints", False, f"content lint rules failed to run: {exc}")
+
+                for rule, fn in (
+                    ("quote-integrity", _check_quote_integrity),
+                    ("retracted-citations", _check_retracted_citations),
+                ):
+                    errors = [
+                        i for i in fn(vault, vault.db, report_path, report_text)
+                        if i.get("severity") == "error"
+                    ]
+                    check(
+                        rule,
+                        not errors,
+                        "clean" if not errors else (
+                            f"{len(errors)} error(s) — first: "
+                            f"{errors[0].get('message', '')[:160]}"
+                        ),
+                    )
+            except Exception as exc:
+                check("content-lints", False, f"content lint rules failed to run: {exc}")
+
+    if not current_contract:
+        for rule in ("quote-integrity", "retracted-citations"):
+            check(rule, False, "unavailable/unverified: legacy or unknown finalization contract; database-backed lint omitted and database left unopened")
 
     # Tier-mandated artifacts, keyed on the tier the run actually ran (see
     # _required_step_ids) rather than the profile it was initialized with.
@@ -1237,7 +1267,6 @@ def verify_run(vault, vault_tag: str) -> dict:
             parse_findings,
             parse_pairs,
             report_revision,
-            validate_coverage,
             validate_resolutions,
         )
 
@@ -1264,26 +1293,13 @@ def verify_run(vault, vault_tag: str) -> dict:
                         report_revision(report_path.read_bytes()),
                     )
                 ok = True
-                detail = f"valid v1 findings; {len(criticals)} critical finding(s) reviewed and resolved"
+                detail = f"file-only v1 contract: {len(criticals)} critical resolution record(s) bound to report bytes; source-body review unverified"
         except (CitationContractError, OSError, UnicodeError, json.JSONDecodeError) as exc:
             ok = False
             detail = f"citation artifacts invalid/unverified: {exc}"
         check("cite-check-resolved", ok, detail)
-        try:
-            coverage = validate_coverage(
-                json.loads((run_dir / "cite-check-pairs.json").read_text(encoding="utf-8-sig")),
-                json.loads(cc_findings.read_text(encoding="utf-8-sig")), vault,
-            )
-            coverage_ok = True
-            coverage_detail = (
-                f"{coverage['coverage_mode']} coverage; {coverage['reviewed']}/{coverage['selected']} "
-                f"selected pairs reviewed; {coverage['unreviewed']} unreviewed; "
-                f"{coverage['dangling']} dangling occurrences accounted for"
-            )
-        except (CitationContractError, OSError, UnicodeError, json.JSONDecodeError) as exc:
-            coverage_ok = False
-            coverage_detail = f"citation coverage invalid/unverified: {exc}"
-        check("cite-check-coverage", coverage_ok, coverage_detail)
+        check("cite-check-coverage", False,
+              "unavailable/unverified: legacy or unknown finalization contract; source-body coverage requires database access, which is omitted")
 
     if current_contract:
         try:

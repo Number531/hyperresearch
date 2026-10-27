@@ -86,7 +86,7 @@ def run_status(
     json_output: bool = typer.Option(False, "--json", "-j", help="JSON output"),
 ) -> None:
     """Show a run's manifest + resume position + stall/budget state."""
-    from hyperresearch.core.runs import RunError, status_summary
+    from hyperresearch.core.runs import RunError, is_current_run, status_summary
 
     vault = _vault_or_exit(json_output)
     tag = _resolve_tag(vault, vault_tag, json_output)
@@ -100,12 +100,16 @@ def run_status(
         raise typer.Exit(1)
 
     # Browser-lane queue depth for this run
-    try:
-        from hyperresearch.core.escalation import queue_stats
+    if is_current_run(summary):
+        try:
+            from hyperresearch.core.escalation import queue_stats
 
-        summary["escalations"] = queue_stats(vault.db, vault_tag=tag)
-    except Exception:
+            summary["escalations"] = queue_stats(vault.db, vault_tag=tag)
+        except Exception:
+            summary["escalations"] = None
+    else:
         summary["escalations"] = None
+        summary["escalations_diagnostic"] = "unavailable/unverified: legacy or unknown finalization contract; queue lookup omitted and database left unopened"
 
     if json_output:
         output(success(summary, vault=str(vault.root)), json_mode=True)
@@ -118,6 +122,8 @@ def run_status(
                 f"inference_depth={levers.get('inference_depth', 'standard')}"
             )
         esc = summary.get("escalations")
+        if summary.get("escalations_diagnostic"):
+            console.print(f"  [yellow]escalations:[/] {summary['escalations_diagnostic']}")
         if esc and (esc.get("queued") or esc.get("needs_human")):
             console.print(
                 f"  [yellow]escalations:[/] {esc['queued']} queued, {esc['needs_human']} need the human"

@@ -20,7 +20,7 @@ from hyperresearch.core.runs import init_run, run_report_data, set_step, verify_
 def _legacy_diagnostic_fixtures(request, monkeypatch):
     """The pre-finalization structural fixtures intentionally carry no current approval.
 
-    Preserve their focused lint/schema assertions as read-only legacy diagnostics;
+    Preserve their focused file-rule/schema assertions as read-only legacy diagnostics;
     complete current-version runs are exercised separately below.
     """
     legacy = request.cls and request.cls.__name__ in {
@@ -38,6 +38,15 @@ def _legacy_diagnostic_fixtures(request, monkeypatch):
             return manifest
 
         monkeypatch.setattr(__import__(__name__, fromlist=["init_run"]), "init_run", legacy_init)
+
+
+def _assert_legacy_unverified(result):
+    assert result["passed"] is False
+    assert result["diagnostic_only"] is True
+    by_name = {item["name"]: item for item in result["checks"]}
+    for rule in ("quote-integrity", "retracted-citations"):
+        assert by_name[rule]["ok"] is False
+        assert "unavailable/unverified" in by_name[rule]["detail"]
 
 
 def _write_supported_audit(vault, tag, report, *, final=False, rate=1.0):
@@ -595,7 +604,7 @@ class TestCJKLengthCheck:
         by_name = {c["name"]: c for c in result["checks"]}
         assert by_name["length-in-range"]["ok"] is True
         assert "chars" in by_name["length-in-range"]["detail"]
-        assert result["passed"] is True
+        _assert_legacy_unverified(result)
 
     def test_verify_still_fails_cjk_report_far_outside_char_target(self, tmp_vault):
         init_run(tmp_vault, "cjk-02", profile="light")
@@ -683,7 +692,7 @@ class TestClassifiedTierArtifacts:
         assert not [n for n in names if n.startswith("artifact:critic-findings")]
         assert "artifact:patch-log.json" not in names
         assert "artifact:polish-log.json" in names
-        assert result["passed"] is True
+        _assert_legacy_unverified(result)
 
     def test_gear_run_without_declared_tier_still_needs_critic_artifacts(self, tmp_vault):
         self._light_classified_gear_run(tmp_vault, "tier-02", None)
@@ -731,7 +740,7 @@ class TestTelemetryAndVerify:
         assert by_name["required-headings"]["ok"]
         assert by_name["length-in-range"]["ok"]
         assert by_name["citation-density"]["ok"]
-        assert result["passed"] is True
+        _assert_legacy_unverified(result)
 
     def test_verify_density_counts_each_grouped_source(self, tmp_vault):
         init_run(tmp_vault, "vf-04", profile="light")
@@ -1627,3 +1636,174 @@ class TestFinalizationContract:
         manifest = init_run(tmp_vault, "fractional-required")
         stages = _required_stage_ids(manifest, tmp_vault.run_dir("fractional-required"), tmp_vault.config_path)
         assert stages[stages.index("14") + 1:stages.index("16")] == ["14.5", "15"]
+
+
+class TestFinalizationAuditCorrections:
+    @pytest.mark.parametrize("command", ["verify", "finish", "status", "resume"])
+    def test_legacy_cli_does_not_access_database_property(self, tmp_vault, monkeypatch, command):
+        from typer.testing import CliRunner
+
+        from hyperresearch.cli import app
+        from hyperresearch.core.runs import manifest_path
+        from hyperresearch.core.vault import Vault
+
+        tag = "legacy-no-access"
+        TestFinishGate()._well_formed_light_run(tmp_vault, tag, complete=False)
+        path = manifest_path(tmp_vault, tag)
+        manifest = json.loads(path.read_text())
+        manifest.pop("finalization_version")
+        manifest["steps"]["14.5"] = {"status": "done"}
+        path.write_text(json.dumps(manifest))
+        calls = []
+
+        def reject_database_access(vault):
+            calls.append(vault.root)
+            raise AssertionError("legacy diagnostics may not access Vault.db")
+
+        monkeypatch.setattr(Vault, "db", property(reject_database_access))
+        monkeypatch.chdir(tmp_vault.root)
+        result = CliRunner().invoke(app, ["run", command, tag, "--json"])
+        assert result.exit_code in (0, 1), result.exception
+        assert calls == []
+        if command in {"verify", "finish"}:
+            data = json.loads(result.stdout)["data"]
+            data = data["verify"] if command == "finish" else data
+            by_name = {check["name"]: check for check in data["checks"]}
+            assert by_name["cite-check-coverage"]["ok"] is False
+            assert "database access" in by_name["cite-check-coverage"]["detail"]
+
+    @pytest.mark.parametrize("command", ["verify", "finish", "status", "resume"])
+    @pytest.mark.parametrize("db_state", ["old-schema", "missing-index", "missing-db"])
+    @pytest.mark.parametrize("version", [None, True, 2])
+    def test_legacy_cli_diagnostics_never_open_or_change_database(self, tmp_vault, monkeypatch, command, db_state, version):
+        import sqlite3
+
+        from typer.testing import CliRunner
+
+        from hyperresearch.cli import app
+        from hyperresearch.core.runs import manifest_path
+
+        tag = "legacy-database"
+        report = TestFinishGate()._well_formed_light_run(tmp_vault, tag, complete=False)
+        path = manifest_path(tmp_vault, tag)
+        manifest = json.loads(path.read_text())
+        if version is None:
+            manifest.pop("finalization_version")
+        else:
+            manifest["finalization_version"] = version
+        manifest["verify"] = {"passed": True, "at": "historical-receipt", "original": "preserve this stored receipt"}
+        path.write_text(json.dumps(manifest))
+        tmp_vault._conn.close()
+        tmp_vault._conn = None
+        if db_state == "missing-db":
+            tmp_vault.db_path.unlink()
+        else:
+            with sqlite3.connect(tmp_vault.db_path) as connection:
+                connection.execute("INSERT INTO _meta(key, value) VALUES ('legacy-sentinel', 'unchanged')")
+                connection.execute("DROP INDEX IF EXISTS idx_notes_tier")
+                if db_state == "old-schema":
+                    connection.execute("UPDATE _meta SET value = '9' WHERE key = 'schema_version'")
+            connection.close()
+        before_db = tmp_vault.db_path.read_bytes() if tmp_vault.db_path.exists() else None
+        before_db_files = {file: file.read_bytes() for file in tmp_vault.db_path.parent.glob(f"{tmp_vault.db_path.name}*")}
+        before_artifacts = {file: file.read_bytes() for file in tmp_vault.run_dir(tag).rglob("*") if file.is_file()}
+        before_artifacts[report] = report.read_bytes()
+        monkeypatch.chdir(tmp_vault.root)
+        result = CliRunner().invoke(app, ["run", command, tag, "--json"])
+        assert result.exit_code in (0, 1), result.exception
+        assert (tmp_vault.db_path.read_bytes() if tmp_vault.db_path.exists() else None) == before_db
+        assert {file: file.read_bytes() for file in tmp_vault.db_path.parent.glob(f"{tmp_vault.db_path.name}*")} == before_db_files
+        if db_state != "missing-db":
+            with sqlite3.connect(f"file:{tmp_vault.db_path}?mode=ro", uri=True) as connection:
+                assert connection.execute("SELECT value FROM _meta WHERE key = 'legacy-sentinel'").fetchone()[0] == "unchanged"
+                assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'idx_notes_tier'").fetchone() is None
+                if db_state == "old-schema":
+                    assert connection.execute("SELECT value FROM _meta WHERE key = 'schema_version'").fetchone()[0] == "9"
+            connection.close()
+        after_artifacts = {file: file.read_bytes() for file in tmp_vault.run_dir(tag).rglob("*") if file.is_file()}
+        after_artifacts[report] = report.read_bytes()
+        assert after_artifacts == before_artifacts
+        payload = json.loads(result.stdout)["data"]
+        if command in {"verify", "finish"}:
+            diagnostic = payload["verify"] if command == "finish" else payload
+            assert diagnostic["passed"] is False and diagnostic["diagnostic_only"] is True
+            by_name = {check["name"]: check for check in diagnostic["checks"]}
+            assert by_name["required-headings"]["ok"] is True
+            assert by_name["quote-integrity"]["ok"] is False
+            assert "unavailable" in by_name["quote-integrity"]["detail"]
+        elif command == "status":
+            assert payload["approval_current"] is False
+            assert payload["escalations"] is None
+            assert "unavailable" in payload["escalations_diagnostic"]
+        else:
+            assert payload["action"] == "legacy-diagnostic" and payload["approval_current"] is False
+
+    def test_shipped_instruction_structural_mirror_survives_renewed_completion(self, cited_vault):
+        from hyperresearch.core.runs import finish_run
+
+        tag = "structural-mirror"
+        report = _complete_profile(cited_vault, tag)
+        path = cited_vault.run_dir(tag) / "critic-findings-instruction.json"
+        path.write_text(json.dumps({"critic_type": "instruction", "findings": [{
+            "severity": "critical", "atomic_item": "required_section_headings[0]: ## Findings",
+            "failure_mode": "wrong-order", "location": "",
+            "issue": "Expected H2 at position 0: Findings. Got MISSING.",
+            "requires_orchestrator_restructure": True,
+        }]}))
+        original = path.read_bytes()
+        for step in ("14.5", "15", "16"):
+            set_step(cited_vault, tag, step, "running")
+            set_step(cited_vault, tag, step, "done")
+        _write_supported_audit(cited_vault, tag, report, final=True)
+        result = finish_run(cited_vault, tag)
+        assert result["verify"]["passed"], [item for item in result["verify"]["checks"] if not item["ok"]]
+        assert path.read_bytes() == original
+
+    def test_finite_decimal_locus_scores_remain_supported(self, cited_vault):
+        from hyperresearch.core.runs import finish_run
+
+        tag = "decimal-locus"
+        report = _complete_profile(cited_vault, tag)
+        path = cited_vault.run_dir(tag) / "loci.json"
+        path.write_text(json.dumps({"loci": [{"name": "Mechanism", "one_line": "A bounded mechanism", "rationale": "Synthetic evidence.",
+            "flavor": "technical", "importance": 1.5, "uncertainty": 1, "disagreement": 1.25,
+            "decision_impact": 1, "composite_score": 4.75, "source_budget": 0}]}))
+        for step in ("14.5", "15", "16"):
+            set_step(cited_vault, tag, step, "running")
+            set_step(cited_vault, tag, step, "done")
+        _write_supported_audit(cited_vault, tag, report, final=True)
+        assert finish_run(cited_vault, tag)["verify"]["passed"]
+
+    @pytest.mark.parametrize("field,bad", [
+        ("importance", "high"), ("uncertainty", None), ("disagreement", True),
+        ("decision_impact", float("nan")), ("composite_score", float("inf")),
+        ("composite_score", float("-inf")), ("source_budget", 0.5),
+    ])
+    def test_locus_scores_reject_nonnumeric_or_nonfinite_values(self, tmp_path, field, bad):
+        from hyperresearch.core.runs import RunError, _validate_output
+
+        record = {"name": "Mechanism", "one_line": "A bounded mechanism", "rationale": "Synthetic evidence.",
+                  "flavor": "technical", "importance": 1, "uncertainty": 1, "disagreement": 1,
+                  "decision_impact": 1, "composite_score": 4, "source_budget": 0}
+        record[field] = bad
+        path = tmp_path / "loci.json"
+        path.write_text(json.dumps({"loci": [record]}))
+        with pytest.raises(RunError, match="finite numeric scores"):
+            _validate_output(path, "loci")
+
+    @pytest.mark.parametrize("role,changed", [
+        ("depth", {}), ("instruction", {"requires_orchestrator_restructure": False}),
+        ("instruction", {"atomic_item": "an ordinary atomic item"}),
+        ("instruction", {"failure_mode": "missing"}), ("instruction", {"severity": "major"}),
+        ("instruction", {"issue": ""}), ("instruction", {"recommendation": None}),
+    ])
+    def test_structural_mirror_exception_does_not_weaken_other_findings(self, tmp_path, role, changed):
+        from hyperresearch.core.runs import RunError, _validate_output
+
+        record = {"severity": "critical", "atomic_item": "required_section_headings[0]: ## Findings",
+                  "failure_mode": "wrong-order", "location": "", "issue": "Required heading is missing.",
+                  "requires_orchestrator_restructure": True, **changed}
+        path = tmp_path / f"critic-findings-{role}.json"
+        path.write_text(json.dumps({"critic_type": role, "findings": [record]}))
+        with pytest.raises(RunError):
+            _validate_output(path, "findings")
