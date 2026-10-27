@@ -104,6 +104,14 @@ for a different route. The initialized profile still supplies the scale gear.
 
 ---
 
+Numeric acceptance uses the run's `manifest.profile` scale gear. Stage 1 done
+freezes `resolved_evidence_requirements: {gear, source_min, claims_min}` while
+the separately resolved pipeline tier freezes the stage route. Optional
+`evidence_requirements` in decomposition records only explicit numeric user
+floors, as nonnegative integers; it can raise but never lower configured gear
+floors. Later raises require fresh review; changing the frozen gear is refused.
+Read these resolved requirements rather than inferring a quota from tier names.
+
 ## Bootstrap (run BEFORE invoking step 1)
 
 Before you invoke any step skill, do this:
@@ -282,7 +290,7 @@ legitimate polish; it is not approval of the final report.
    the complete report, query/decomposition and every pair. Final extraction
    defaults to comprehensive; sampled final is diagnostic and cannot finish.
    Retain every supported/negative pair result plus local original-body
-   evidence and the versioned `semantic_review` extension in
+   evidence and the versioned `semantic_review` and `corpus_review` extensions in
    `final-cite-check-findings.json`. Review every inventory unit, including
    uncited prose/tables/lists/quotes and reference-section tails, with exact
    atomic assertion or reasoned nonassertive span coverage. Record scoped
@@ -292,6 +300,15 @@ legitimate polish; it is not approval of the final report.
    uncited with a reasoned basis. Source-dependent calculations need cited
    premises. Pair shards, when explicitly used, preserve one complete review
    owner and every result; they cannot silently discard extension fields.
+   The same owner qualifies every `corpus_inputs.members` entry, including
+   relevant uncited tagged originals and explicitly reused bibliography notes.
+   Record current work/mirror identity, capture adequacy/relevance and scoped
+   independence, plus assertion-to-proposition mappings. Adequate original
+   excerpts can meet the source floor; abstracts and metadata cannot.
+   Bounded abstract facts and explicit secondary attribution may support
+   atomic units under their limited scope. Vendor documentation does not
+   establish independent measured benchmarks. Repeated citations, mirrored
+   works and repeated atomic propositions cannot inflate either floor.
 4. Any current final **critical or major** finding, non-supported material
    assertion, or blocking task/method judgment requires a real report/source
    correction followed by fresh extraction and reviewed results. A same-byte
@@ -307,7 +324,13 @@ legitimate polish; it is not approval of the final report.
 `run finish` checks report structure/length/citation density, existing blocking
 content lints, required stage flags and output shapes, initial review history,
 and comprehensive final citation plus whole-report recorded review against
-current locally cited source bodies. Quoted body passages cannot borrow an
+current locally cited source bodies, and separate qualified-original-work and
+supported-atomic-unit floors from the frozen numeric gear requirements.
+Raw notes, pairs, DB claim rows, qualified works, independent works and supported
+atomic units remain separate counts; independence adds no universal quota.
+Corpus bodies, metadata and membership are freshly checked even for uncited
+notes; disk/DB drift blocks instead of triggering automatic synchronization.
+Quoted body passages cannot borrow an
 unrelated note's text. Its existing manifest receipt binds the report, stages, outputs,
 profile/config and blocking lint outcomes. Mutations during verification or
 persistence reject approval. `run status`/`run resume` identify stale approvals;

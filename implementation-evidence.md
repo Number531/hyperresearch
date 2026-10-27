@@ -112,3 +112,56 @@ instructions and original results; zero critical/major/minor findings. Its
 independent selection ran on the clean audited checkpoint: 42 passed, exit 0,
 2.901s (`checks/P1/audit/INDEPENDENT-PROBES/output.log`). Parent reconciled and
 accepted P1, retaining the recorded-judgment limitations. P2 was excluded.
+
+## P2 baseline and readiness
+
+Exact clean phase base: `2548034240ba2aa137ed6a5a3fc332c74e1a8372`.
+Readiness CLI: `phase-dependency-readiness-v1`, ready true for phase 2,
+both prerequisite phase checks and zero-finding audits bound to current plan
+and HEAD before P2 work. P2-REGRESSION (`python -m pytest tests/test_core/ -q`)
+passed in 70.631s; P2-LINT (`python -m ruff check .`) passed in 0.188s.
+Logs: `checks/P2/baseline/`. No new core failure.
+
+Numeric policy retains the existing scale gear (`manifest.profile`); frozen
+pipeline tier controls stages. Freeze that gear's configured evidence floors
+at stage 1; explicit task requirements may raise them, never lower them.
+Qualified counts use reviewed current corpus/propositions, not raw DB rows.
+All additions remain within existing final pairs/findings and verification
+inputs; no research, migration, new artifact, ledger or independence DB write.
+
+## P2 implementation and checks
+
+P2-D1 adds fresh read-only corpus membership/body/metadata inputs, including
+uncited tagged originals and explicit citation/bibliography reuse. The existing
+final findings carries complete qualification/proposition records. Review-based
+unique works and distinct evidence-backed atomic propositions meet separate
+configured floors; raw notes/pairs/DB claims and independent works are separate
+metrics. DOI/URL/body and reviewed identities collapse mirrors; citation-free
+proposition text plus reviewed keys prevents repeated markers/facts inflating
+units. Bounded abstract support, original excerpts, secondary attribution and
+first-party documents have explicit distinct scopes.
+
+Behavioral red `P2/red/QUALITY-FLOORS`: 12 intended failures, 2.943s,
+including raw-quota acceptance, ignored requirement freeze, invalid minima
+and five stale uncited-corpus approvals. Pure validator tests cover full 45/30
+boundaries and one-below controls. Fixture floors are explicit synthetic1/1
+overlays; an existing configured90 test now correctly rejects one source.
+
+Early focused run found a duplicate synthetic profile table in a mutation
+fixture; fixed table insertion while preserving its density-change assertion.
+Nine raw-regex strings and one import-format lint issue were corrected. A
+premier prompt assertion retained its exact130 scale phrase after revised
+qualification wording. Original failed command logs are retained.
+
+Mapped producer seam: package `hyperresearch-1-decompose.md` documents explicit
+task raises at the step which writes them, extending planned entry/freeze
+instructions within P2. No global installed skill changes. Mapped backward
+P1 seam: stable finding P1-Q-LONG, current quote regex inherited a600-character
+limit. Tests reproduced two false passes (1.044s); the first bounded correction
+adds an unbounded matcher only to current citation-local verification. Legacy
+FTS diagnostics are unchanged. Fresh phase audit must close P1-Q-LONG.
+
+Final P2-REGRESSION (`python -m pytest tests/test_core/ -q`) passed,73.422s;
+P2-LINT passed,0.137s (`checks/P2/close/`). No new core failure against phase
+baseline. Independent audit follows the local checkpoint. Originality,
+relevance, semantic support and reviewer independence remain recorded judgments.

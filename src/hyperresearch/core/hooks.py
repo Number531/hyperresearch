@@ -3708,6 +3708,81 @@ If pair work was explicitly sharded, exactly ONE designated owner must retain
 the complete semantic_review. The native merge retains that extension and
 rejects duplicate owners; never silently discard it or merge partial unit sets.
 
+### Corpus qualification corpus_review version 1 (same final owner)
+
+Read `corpus_inputs` in the SAME final pairs file. Its exact requirements
+come from the numeric scale gear in manifest.profile, frozen at stage 1;
+resolved_pipeline_tier controls stages, not these numbers. Configured floors
+and optional decomposition evidence_requirements can raise source_min and
+claims_min, never lower frozen floors. Do not substitute a universal quota.
+
+The corpus includes every current-tagged note, including uncited notes, plus
+explicitly cited/reused notes and resolved bibliography entries. Read each
+member's current DB-mapped parsed body. A source/body/metadata/membership or
+requirement change requires fresh extraction and review. Verify never syncs,
+ingests or recomputes independence; a disk/DB drift error requires explicit
+correction outside verification. Do not rewrite old note bodies or claim tags
+to reuse a source. Raw DB claims are informational note_id/claim_hash rows
+within this corpus, including old-run rows; they never establish support.
+
+Add `corpus_review` beside semantic_review in the SAME findings envelope:
+- `schema_version: 1`, `report_revision` copied from the pairs file,
+  `corpus_input_digest` copied from corpus_inputs.input_digest, and
+  `reviewer: {identity, provenance_note}` recording this whole-report owner's
+  declared provenance, without claiming independently proven execution.
+- `qualifications`: exactly one record per corpus_inputs.members entry, in
+  that order, with `note_id`, current `source_revision`, reviewed `work_id`
+  and `mirror_group`, and explicit judgments:
+  `capture_kind` is original-full, original-excerpt, original-abstract,
+  metadata-only, secondary, or unknown; `originality` is original, secondary,
+  or unknown; `relevance` is relevant, not-relevant, or unknown; `substance`
+  is adequate, inadequate, or unknown. Supply a nonempty literal current
+  parsed-body `source_excerpt` and nonempty `reason` addressing identity,
+  originality, task relevance and capture adequacy. An unavailable/empty
+  body instead requires null source_excerpt and an honest nonqualifying
+  judgment. Include `independence: {outcome, scope, reason}`, with outcome
+  independent, first-party, derivative, or unknown and nonempty scoped reasons.
+- `propositions`: exactly one record per semantic_review assertion that is
+  supported empirical, or supported source-dependent derived, and has body
+  evidence, in semantic unit/assertion order. Copy its current `assertion_id`,
+  assign a stable `proposition_key`, and give `evidence_scope` plus a nonempty
+  `reason` for support scope and proposition identity. Scope is
+  original-document, independent-measurement, bounded-abstract, or
+  secondary-attribution. Use the same proposition_key for paraphrases of the
+  same atomic proposition; different keys cannot multiply identical normalized
+  assertion text. Never turn repeated citations into distinct propositions.
+
+Only relevant adequately captured original-full/original-excerpt works meet
+source_min. Adequate original introductions/excerpts may qualify; no complete
+paper/all-tables requirement is added. Metadata/landing stubs, abstracts,
+secondary captures and unknowns do not meet this substantive-original quota.
+The current canonical final report never counts as an external original.
+Work and mirror identities plus deterministic DOI, conservative canonical URL
+and exact normalized parsed-body ties collapse copies even if you assign
+different work IDs. Do not merge unique works merely for shared titles/authors.
+Judge other derivation/paraphrase relationships explicitly; hints are not truth.
+
+An original abstract can support an explicitly bounded abstract-level fact
+under bounded-abstract, and a secondary body can support explicit attribution
+under secondary-attribution. Such eligible facts can meet claims_min while
+their captures do not meet source_min. First-party vendor API documentation
+can qualify as an original document; it cannot supply independent-measurement
+support unless independently measured original evidence actually supports that
+assertion. Scope must match the reviewed source evidence, not the desired quota.
+Every material supported assertion needs eligible local body evidence for its
+scope even when other works/claims already meet both floors. Unknown or
+metadata-only evidence cannot clear material empirical support. Uncited
+proposals, parameters, capture gaps and source-free arithmetic never count as
+supported atomic evidence, even if irrelevant citations are attached.
+
+The gate reports raw notes, citation pairs, raw DB claim rows, qualified unique
+works, independent works and distinct supported atomic units separately.
+Independent works is informational, with no extra universal minimum. One
+designated final owner retains BOTH complete semantic_review and corpus_review;
+native shard merge preserves each and rejects duplicate extension owners.
+Qualification, relevance, independence, atomization and paraphrase judgments
+remain recorded review, not automatically established semantic truth.
+
 The extraction binds the exact final report and completed stage/output inputs.
 A current final critical or major finding or blocking semantic judgment requires
 real report/source correction, fresh extraction and reviewed results. A

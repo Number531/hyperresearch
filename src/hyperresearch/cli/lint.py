@@ -96,6 +96,7 @@ def _latest_report(vault):
 
 
 _QUOTE_SPAN_RE = re.compile(r'[\"“]([^\"“”]{1,600}?)[\"”]')
+_CURRENT_QUOTE_SPAN_RE = re.compile(r'["“]([^"“”]+)["”]')
 _REPORT_NUMBER_RE = re.compile(r"\d[\d,]*\.\d+%?|\d[\d,]{3,}%?|\d[\d,]*%")
 
 
@@ -164,7 +165,7 @@ def _check_cited_quote_integrity(
     by_pair = {pair["pair_id"]: pair for pair in pairs}
     cache = {} if source_cache is None else source_cache
     issues = []
-    for match in _QUOTE_SPAN_RE.finditer(report_text):
+    for match in _CURRENT_QUOTE_SPAN_RE.finditer(report_text):
         quote = re.sub(r"\s+", " ", match.group(1)).strip()
         if len(quote.split()) < 5:
             continue

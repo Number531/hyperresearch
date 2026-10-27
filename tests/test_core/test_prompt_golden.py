@@ -8,6 +8,11 @@ or template deliberately requires updating the golden, which makes prompt
 changes reviewable instead of silent.
 
 Deliberate deviations already folded into the goldens (2026-07-19):
+  - Qualified corpus evidence (2026-10-27): the existing final checker owns
+    corpus_review alongside semantic_review. Current tagged/explicitly reused
+    corpus inputs bind uncited members, original capture qualification, mirror
+    identities and distinct scoped supported propositions to frozen gear
+    floors; raw counters and independent works remain separate diagnostics.
   - Whole-report final review (2026-10-27): comprehensive final pairs plus a
     versioned semantic_review in the existing findings envelope, exact unit/
     atomic span coverage, scoped recorded task/method judgments, local original

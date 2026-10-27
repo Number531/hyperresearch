@@ -101,6 +101,19 @@ Read both before starting. The vault_tag is in the scaffold's "Run config" secti
 }
 ```
 
+   **Optional numeric evidence requirements.** Only when the user's prompt
+   explicitly requests a numeric minimum for original sources or supported
+   atomic claims, add `evidence_requirements` to this JSON object, using
+   `source_min` and/or `claims_min` as nonnegative integers (not booleans,
+   strings or fractions). For an explicit request for 60 original sources,
+   write `"evidence_requirements": {"source_min": 60}`. Otherwise omit the
+   field; do not infer arbitrary quotas from words such as "comprehensive".
+   These values can raise, never lower, the configured numeric scale-gear
+   floors. Stage 1 done freezes `resolved_evidence_requirements` with the
+   run's manifest.profile gear identity, separately from pipeline_tier.
+   Later requirement/configuration raises demand fresh final review; neither
+   can lower frozen floors. Preserve the gear when classifying a light route.
+
 5. **Omit nothing the prompt names explicitly.** List every numbered ask, every named entity, every format cue as a separate atomic item, even if they feel redundant. The instruction-critic catches false-positive atomic items cheaply; it cannot catch false-negatives.
 
 6. **Do NOT include wrapper-contract requirements here** — those live in `research/wrapper_contract.json` separately. The decomposition is ONLY about what the user's actual prompt named.

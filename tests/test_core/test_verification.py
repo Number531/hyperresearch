@@ -73,9 +73,168 @@ def _write_supported_audit(vault, tag, report, *, final=False, rate=1.0):
                                    "evidence": "Synthetic recorded literal-body review."})
     if final:
         payload["semantic_review"] = _synthetic_semantic_review(vault, pairs)
+        payload["corpus_review"] = _synthetic_corpus_review(vault, pairs, payload["semantic_review"])
     name = "final-cite-check-findings.json" if final else "cite-check-findings.json"
     (vault.run_dir(tag) / name).write_text(json.dumps(payload), encoding="utf-8")
     return pairs, payload
+
+
+def _synthetic_profile_floors(vault, profile):
+    """Declare tiny fixture scale before stage 1; preserve explicit overrides."""
+    import re
+
+    text = vault.config_path.read_text()
+    section = re.search(rf"(?m)^\[profile\.{re.escape(profile)}\][^\n]*\n", text)
+    if section:
+        following = re.search(r"(?m)^\[", text[section.end():])
+        end = section.end() + following.start() if following else len(text)
+        block = text[section.end():end]
+        additions = "".join(f"{key} = 1\n" for key in ("source_min", "claims_min") if not re.search(rf"(?m)^{key}\s*=", block))
+        text = text[:section.end()] + additions + text[section.end():]
+    else:
+        text += f"\n[profile.{profile}]\nsource_min = 1\nclaims_min = 1\n"
+    vault.config_path.write_text(text)
+
+
+def _synthetic_corpus_review(vault, pairs, semantic):
+    """Test-authored qualification of synthetic notes, never production inference."""
+    from hyperresearch.core.citation_contracts import source_input
+
+    corpus = pairs["corpus_inputs"]
+    qualifications = []
+    for member in corpus["members"]:
+        snapshot, body = source_input(vault, member["note_id"])
+        qualifications.append({"note_id": member["note_id"], "source_revision": snapshot["revision"],
+            "work_id": member["note_id"], "mirror_group": member["note_id"],
+            "capture_kind": "unknown" if member["is_final_report"] else "original-excerpt",
+            "originality": "unknown" if member["is_final_report"] else "original", "relevance": "relevant",
+            "substance": "adequate" if body else "inadequate", "source_excerpt": body.strip()[:80] if body else None,
+            "reason": "Fixture author explicitly qualifies this authored synthetic original documentary passage for the bounded query.",
+            "independence": {"outcome": "first-party", "scope": "This synthetic document's own qualitative description only.",
+                             "reason": "Authored synthetic documentary evidence; no independent measurement is claimed."}})
+    propositions = [{"assertion_id": assertion["assertion_id"], "proposition_key": assertion["text"],
+                     "evidence_scope": "original-document", "reason": "Fixture author records this bounded synthetic documentary proposition identity and scope."}
+                    for unit in semantic["units"] for assertion in unit["assertions"]
+                    if assertion["disposition"] == "supported" and assertion["kind"] in {"empirical", "derived"} and assertion.get("evidence")]
+    return {"schema_version": 1, "report_revision": pairs["report_revision"], "corpus_input_digest": corpus["input_digest"],
+            "reviewer": {"identity": "synthetic-fixture-author", "provenance_note": "Test-authored judgments; no independent execution claimed."},
+            "qualifications": qualifications, "propositions": propositions}
+
+
+class TestP2QualifiedEvidence:
+    """Corpus membership/floor behavior uses only authored synthetic notes."""
+
+    def test_raw_notes_and_repeated_citations_cannot_replace_full_floor(self, cited_vault):
+        from hyperresearch.core.runs import finish_run
+
+        _complete_profile(cited_vault, "raw-quota", synthetic_floors=False)
+        result = finish_run(cited_vault, "raw-quota")
+        assert result["verify"]["passed"] is False
+        assert "minimum" in next(check["detail"] for check in result["verify"]["checks"] if check["name"] == "finalization")
+
+    def test_stage_one_freezes_numeric_gear_even_when_route_changes(self, tmp_vault):
+        from hyperresearch.core.runs import load_manifest
+
+        init_run(tmp_vault, "gear-freeze", profile="premier")
+        path = tmp_vault.run_dir("gear-freeze") / "prompt-decomposition.json"
+        path.write_text(json.dumps({"pipeline_tier": "light", "evidence_requirements": {"source_min": 95, "claims_min": 60}}))
+        set_step(tmp_vault, "gear-freeze", "1", "done")
+        manifest = load_manifest(tmp_vault, "gear-freeze")
+        assert manifest["resolved_pipeline_tier"] == "light"
+        assert manifest["resolved_evidence_requirements"] == {"gear": "premier", "source_min": 95, "claims_min": 60}
+
+    @pytest.mark.parametrize("field,value", [("source_min", True), ("source_min", -1), ("source_min", 1.5), ("claims_min", "30")])
+    def test_invalid_decomposition_minima_fail_before_freeze(self, tmp_vault, field, value):
+        from hyperresearch.core.runs import RunError
+
+        init_run(tmp_vault, "bad-minimum", profile="full")
+        (tmp_vault.run_dir("bad-minimum") / "prompt-decomposition.json").write_text(json.dumps({"pipeline_tier": "full", "evidence_requirements": {field: value}}))
+        with pytest.raises(RunError, match=r"requirement|minimum"):
+            set_step(tmp_vault, "bad-minimum", "1", "done")
+
+    def test_decomposition_cannot_lower_profile_floor(self, tmp_vault):
+        from hyperresearch.core.runs import load_manifest
+
+        init_run(tmp_vault, "minimum-floor", profile="full")
+        (tmp_vault.run_dir("minimum-floor") / "prompt-decomposition.json").write_text(json.dumps({"pipeline_tier": "light", "evidence_requirements": {"source_min": 1, "claims_min": 1}}))
+        set_step(tmp_vault, "minimum-floor", "1", "done")
+        assert load_manifest(tmp_vault, "minimum-floor")["resolved_evidence_requirements"] == {"gear": "full", "source_min": 45, "claims_min": 30}
+
+    def test_corpus_snapshot_includes_uncited_and_bibliography_reuse_with_old_claim_tags(self, cited_vault):
+        from hyperresearch.core.note import write_note
+        from hyperresearch.core.sync import compute_sync_plan, execute_sync
+
+        tag = "reuse-corpus"
+        write_note(cited_vault.notes_dir, "Uncited Original", body="A distinct original relevant method with a captured adequate passage.", tags=[tag])
+        execute_sync(cited_vault, compute_sync_plan(cited_vault, force=True))
+        cited_vault.db.execute("INSERT INTO claims (note_id, claim, claim_hash, vault_tag, ingested_at) VALUES (?, ?, ?, ?, ?)",
+                              ("rust-ownership", "Old bounded original claim", "old-claim", "older-run", "2026-01-01"))
+        cited_vault.db.commit()
+        report = _complete_profile(cited_vault, tag, "light")
+        report.write_text(report.read_text() + "\n## References\n[8] Rust Ownership. https://example.com/rust\n")
+        set_step(cited_vault, tag, "16", "running")
+        set_step(cited_vault, tag, "16", "done")
+        pairs, _ = _write_supported_audit(cited_vault, tag, report, final=True)
+        corpus = pairs["corpus_inputs"]
+        assert {member["note_id"] for member in corpus["members"]} >= {"python-async-patterns", "uncited-original", "rust-ownership"}
+        assert {"note_id": "rust-ownership", "claim_hash": "old-claim"} in corpus["raw_claim_rows"]
+
+    @pytest.mark.parametrize("change", ["body", "new-tagged-note", "tag", "metadata", "malformed-id", "delete"])
+    def test_uncited_corpus_change_invalidates_approval_without_auto_sync(self, cited_vault, change):
+        from hyperresearch.core.note import write_note
+        from hyperresearch.core.runs import approval_current, finish_run, load_manifest
+        from hyperresearch.core.sync import compute_sync_plan, execute_sync
+
+        tag = "fresh-corpus"
+        path = write_note(cited_vault.notes_dir, "Uncited Current Original", body="Original relevant uncited source body.", tags=[tag])
+        execute_sync(cited_vault, compute_sync_plan(cited_vault, force=True))
+        _complete_profile(cited_vault, tag, "light")
+        assert finish_run(cited_vault, tag)["verify"]["passed"]
+        manifest = load_manifest(cited_vault, tag)
+        before = cited_vault.db.total_changes
+        if change == "body":
+            path.write_text(path.read_text() + "\nA new uncited result changes the corpus.\n")
+        elif change == "new-tagged-note":
+            write_note(cited_vault.notes_dir, "New Unsynced Tagged", body="A newly tagged original.", tags=[tag])
+        elif change == "tag":
+            path.write_text(path.read_text().replace(f"- {tag}", "- older-run"))
+        elif change == "metadata":
+            path.write_text(path.read_text().replace("title: Uncited Current Original", "title: Changed uncited metadata"))
+        elif change == "malformed-id":
+            path.write_text(path.read_text().replace("id: uncited-current-original", "id: false"))
+        else:
+            path.unlink()
+        assert approval_current(cited_vault, manifest) is False
+        assert cited_vault.db.total_changes == before
+
+    def test_frozen_minima_cannot_drop_and_later_raises_invalidate_approval(self, cited_vault):
+        from hyperresearch.core.runs import approval_current, finish_run, load_manifest
+
+        tag = "frozen-floor"
+        _complete_profile(cited_vault, tag, "light")
+        result = finish_run(cited_vault, tag)
+        assert result["verify"]["passed"]
+        manifest = load_manifest(cited_vault, tag)
+        assert manifest["resolved_evidence_requirements"] == {"gear": "light", "source_min": 1, "claims_min": 1}
+        config = cited_vault.config_path
+        config.write_text(config.read_text().replace("source_min = 1", "source_min = 0").replace("claims_min = 1", "claims_min = 0"))
+        assert approval_current(cited_vault, manifest) is False
+        from hyperresearch.core.runs import finalization_inputs
+        assert finalization_inputs(cited_vault, tag)["evidence_requirements"] == {"gear": "light", "source_min": 1, "claims_min": 1}
+        config.write_text(config.read_text().replace("source_min = 0", "source_min = 2"))
+        assert finalization_inputs(cited_vault, tag)["evidence_requirements"]["source_min"] == 2
+
+    def test_symlink_directory_in_notes_is_rejected_without_following(self, cited_vault, tmp_path):
+        from hyperresearch.core.citation_contracts import CitationContractError
+
+        tag = "corpus-link"
+        report = _complete_profile(cited_vault, tag, "light")
+        outside = tmp_path / "outside-corpus"
+        outside.mkdir()
+        (outside / "secret.md").write_text("---\ntitle: Secret\ntags: [corpus-link]\n---\nMust not be read.")
+        (cited_vault.notes_dir / "linked-directory").symlink_to(outside, target_is_directory=True)
+        with pytest.raises(CitationContractError, match="symlink"):
+            _write_supported_audit(cited_vault, tag, report, final=True)
 
 
 def _synthetic_semantic_review(vault, pairs):
@@ -130,6 +289,9 @@ def _synthetic_semantic_review(vault, pairs):
 
 def _complete_light(vault, tag, report):
     """Shipped light outputs plus genuine stage transitions and selected results."""
+    from hyperresearch.core.runs import load_manifest
+
+    _synthetic_profile_floors(vault, load_manifest(vault, tag)["profile"])
     run = vault.run_dir(tag)
     for name in ("query.md", "scaffold.md", "temp/coverage-matrix.md"):
         path = run / name
@@ -147,10 +309,12 @@ def _complete_light(vault, tag, report):
     _write_supported_audit(vault, tag, report, final=True)
 
 
-def _complete_profile(vault, tag, profile="full"):
+def _complete_profile(vault, tag, profile="full", *, synthetic_floors=True):
     """Synthetic shipped producer artifacts; no live sources or model calls."""
     from hyperresearch.core.runs import record_event
 
+    if synthetic_floors:
+        _synthetic_profile_floors(vault, profile)
     init_run(vault, tag, profile=profile, query="Synthetic query", session_id="final-session")
     run = vault.run_dir(tag)
     report = vault.notes_dir / f"final_report_{tag}.md"
@@ -1544,8 +1708,9 @@ class TestFinalizationContract:
             config.write("\n[profile.full]\nsource_min = 90\ncitation_density_min = 12\n")
         _complete_profile(cited_vault, "custom-scale", "full")
         result = finish_run(cited_vault, "custom-scale")
-        assert result["verify"]["passed"]
+        assert result["verify"]["passed"] is False  # One synthetic note cannot meet a configured90-work floor.
         assert result["manifest"]["verify"]["inputs"]["profile"]["source_min"] == 90
+        assert result["manifest"]["resolved_evidence_requirements"]["source_min"] == 90
 
     def test_shipped_nonempty_output_shapes_remain_usable(self, cited_vault):
         from hyperresearch.core.runs import finish_run
@@ -1879,8 +2044,8 @@ class TestFinalizationContract:
             _write_supported_audit(cited_vault, tag, report, final=True)
         assert finish_run(cited_vault, tag)["verify"]["passed"]
         if kind == "config":
-            with cited_vault.config_path.open("a") as config:
-                config.write("\n[profile.light]\ncitation_density_min = 10000\n")
+            config = cited_vault.config_path
+            config.write_text(config.read_text().replace("[profile.light]\n", "[profile.light]\ncitation_density_min = 10000\n"))
         elif kind == "retraction":
             cited_vault.db.execute("UPDATE notes SET is_retracted = 1 WHERE id = 'python-async-patterns'")
             cited_vault.db.commit()

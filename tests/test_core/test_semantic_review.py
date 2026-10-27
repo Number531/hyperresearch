@@ -257,6 +257,36 @@ def test_citation_local_quotes_cannot_borrow_an_unrelated_note(seeded_vault):
         text.replace("[[rust-ownership]]", "[[python-async-patterns]]")) == []
 
 
+@pytest.mark.parametrize("capture", ["absent", "wrong-cited-source"])
+def test_long_quotes_cannot_bypass_current_citation_local_integrity(seeded_vault, capture):
+    from hyperresearch.cli.lint import _check_cited_quote_integrity
+    from hyperresearch.core.note import write_note
+    from hyperresearch.core.sync import compute_sync_plan, execute_sync
+
+    quote = "A captured original passage describes a bounded qualitative mechanism with careful conditions " * 12
+    quote = quote.strip()
+    assert len(quote) > 600 and len(quote.split()) >= 5
+    if capture == "wrong-cited-source":
+        write_note(seeded_vault.notes_dir, "Unrelated Long Capture", body=quote)
+        execute_sync(seeded_vault, compute_sync_plan(seeded_vault, force=True))
+    text = f'The source states "{quote}" [[rust-ownership]].'
+    issues = _check_cited_quote_integrity(seeded_vault, seeded_vault.db, "long-report.md", text)
+    assert any(issue["rule"] == "quote-integrity" and issue["severity"] == "error" for issue in issues)
+
+
+def test_long_literal_quote_in_current_locally_cited_body_passes(seeded_vault):
+    from hyperresearch.cli.lint import _check_cited_quote_integrity
+    from hyperresearch.core.note import write_note
+    from hyperresearch.core.sync import compute_sync_plan, execute_sync
+
+    quote = "A captured original passage describes a bounded qualitative mechanism with careful conditions " * 12
+    quote = quote.strip()
+    write_note(seeded_vault.notes_dir, "Original Long Capture", body=quote)
+    execute_sync(seeded_vault, compute_sync_plan(seeded_vault, force=True))
+    text = f'The source states "{quote}" [[original-long-capture]].'
+    assert _check_cited_quote_integrity(seeded_vault, seeded_vault.db, "long-report.md", text) == []
+
+
 def test_quoted_bibliographic_identity_is_not_a_body_quotation(seeded_vault):
     from hyperresearch.cli.lint import _check_cited_quote_integrity
 

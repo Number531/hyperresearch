@@ -315,6 +315,9 @@ def write_pairs_file(
         from hyperresearch.core.semantic_review import build_inventory
 
         out["semantic_inventory"] = build_inventory(report_text, revision, pairs)
+        from hyperresearch.core.citation_contracts import corpus_inputs
+
+        out["corpus_inputs"] = corpus_inputs(vault, vault_tag, report_text, final_inputs["evidence_requirements"], pairs, source_cache)
     filename = "final-cite-check-pairs.json" if final else "cite-check-pairs.json"
     (run_dir / filename).write_text(
         json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8"

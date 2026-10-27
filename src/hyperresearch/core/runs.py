@@ -259,9 +259,11 @@ def set_step(
         frozen = manifest.get("resolved_pipeline_tier")
         if frozen is not None and tier != frozen:
             raise RunError("pipeline tier changed after stage 1 completion; the resolved route is frozen")
+        requirements = _evidence_requirements(vault, manifest, allow_unfrozen=True)
         if frozen is None:
             manifest["resolved_profile_steps"] = _required_stage_ids(manifest, vault.run_dir(vault_tag), vault.config_path)
             manifest["resolved_pipeline_tier"] = tier
+            manifest["resolved_evidence_requirements"] = requirements
     if chapter and current:
         if _chapter_id_of(chapter) != chapter or "/" in chapter or "\\" in chapter or chapter in {".", ".."}:
             raise RunError("invalid chapter id")
@@ -624,6 +626,40 @@ def _required_stage_ids(manifest: dict, run_dir: Path, config_path: Path | None)
     return sorted(steps, key=_step_sort_key)
 
 
+def _evidence_requirements(vault, manifest: dict, *, allow_unfrozen: bool = False) -> dict:
+    """Numeric scale gear is independent of the stage-routing tier.
+
+    Freeze its identity and resolved minima at stage 1. Later configuration or
+    task raises apply, while neither can lower the frozen floors.
+    """
+    from hyperresearch.core.profiles import _load_user_overlays, resolve_profile
+
+    gear = manifest.get("profile", "full")
+    profile = resolve_profile(gear, vault.config_path)
+    overlay = _load_user_overlays(vault.config_path).get(gear, {})
+    current = {"gear": gear}
+    decomposition_path = vault.run_dir(manifest["vault_tag"]) / "prompt-decomposition.json"
+    decomposition = _read_json(decomposition_path) if decomposition_path.exists() else {}
+    declared = decomposition.get("evidence_requirements", {}) if isinstance(decomposition, dict) else None
+    if not isinstance(declared, dict) or not set(declared) <= {"source_min", "claims_min"}:
+        raise RunError("evidence requirements must contain only source_min/claims_min")
+    for key in ("source_min", "claims_min"):
+        base = overlay.get(key, getattr(profile, key))
+        requested = declared.get(key, 0)
+        if type(base) is not int or base < 0 or type(requested) is not int or requested < 0:
+            raise RunError("evidence requirements require strict nonnegative integer minima")
+        current[key] = max(base, requested)
+    frozen = manifest.get("resolved_evidence_requirements")
+    if frozen is None:
+        if not allow_unfrozen:
+            raise RunError("evidence requirements were not frozen at stage 1 completion")
+        return current
+    if (not isinstance(frozen, dict) or frozen.get("gear") != gear
+            or any(type(frozen.get(key)) is not int or frozen[key] < 0 for key in ("source_min", "claims_min"))):
+        raise RunError("scale gear identity changed or frozen evidence requirements are invalid")
+    return {"gear": gear, **{key: max(current[key], frozen[key]) for key in ("source_min", "claims_min")}}
+
+
 def _report_path(vault, tag: str) -> Path:
     return vault.notes_dir / f"final_report_{tag}.md"
 
@@ -943,6 +979,7 @@ def _step_state(manifest: dict) -> dict:
         "profile": manifest.get("profile"), "profile_steps": manifest.get("profile_steps"),
         "resolved_pipeline_tier": manifest.get("resolved_pipeline_tier"),
         "resolved_profile_steps": manifest.get("resolved_profile_steps"),
+        "resolved_evidence_requirements": manifest.get("resolved_evidence_requirements"),
         "steps": {key: state(value) for key, value in manifest.get("steps", {}).items()},
         "chapters": {key: {"title": value.get("title"), "steps": {
             step: state(entry) for step, entry in value.get("steps", {}).items()
@@ -1063,6 +1100,7 @@ def finalization_inputs(vault, vault_tag: str) -> dict:
     _validate_edit_completion(vault, manifest, "16", current_report=True)
     inputs = {"finalization_version": FINALIZATION_VERSION, "vault_tag": vault_tag,
               "report_revision": _file_revision(_report_path(vault, vault_tag)),
+              "evidence_requirements": _evidence_requirements(vault, manifest),
               **_stage_inputs(vault, manifest)}
     return {**inputs, "input_digest": _digest(inputs)}
 
@@ -1070,7 +1108,7 @@ def finalization_inputs(vault, vault_tag: str) -> dict:
 def _verification_inputs(vault, manifest: dict) -> dict:
     """Stable inputs only: exclude status, heartbeat, spend, and the receipt itself."""
     from hyperresearch.cli.lint import _check_cited_quote_integrity, _check_retracted_citations
-    from hyperresearch.core.citation_contracts import source_input
+    from hyperresearch.core.citation_contracts import corpus_inputs, source_input
     from hyperresearch.core.citecheck import extract_pairs
     from hyperresearch.core.profiles import resolve_profile
 
@@ -1092,6 +1130,7 @@ def _verification_inputs(vault, manifest: dict) -> dict:
             "report_revision": "sha256:" + hashlib.sha256(raw).hexdigest(),
             "outputs": {name: _file_revision(run_dir / name) if (run_dir / name).exists() else None for name in sorted(names)},
             "extracted_pairs": pairs, "sources": sources,
+            "corpus_inputs": corpus_inputs(vault, manifest["vault_tag"], text, _evidence_requirements(vault, manifest), pairs, source_cache),
             "profile": resolve_profile(manifest.get("profile", "full"), vault.config_path).model_dump(),
             "config_revision": _file_revision(vault.config_path) if vault.config_path.exists() else None,
             "blocking_lint_outcomes": lint_outcomes}
@@ -1108,8 +1147,13 @@ def approval_current(vault, manifest: dict) -> bool:
 
 
 def _validate_final_audit(vault, manifest: dict) -> dict:
-    from hyperresearch.core.citation_contracts import parse_findings, validate_coverage
+    from hyperresearch.core.citation_contracts import (
+        corpus_inputs,
+        parse_findings,
+        validate_coverage,
+    )
     from hyperresearch.core.citecheck import extract_pairs
+    from hyperresearch.core.evidence import validate_corpus_review
     from hyperresearch.core.semantic_review import validate_review
 
     run_dir = vault.run_dir(manifest["vault_tag"])
@@ -1137,6 +1181,10 @@ def _validate_final_audit(vault, manifest: dict) -> dict:
     if any(item["severity"] in {"critical", "major"} for item in parse_findings(findings).findings):
         raise RunError("current final critical/major findings require correction and fresh extraction/results; a resolution log cannot clear them")
     coverage.update(validate_review(text, inputs["report_revision"], pairs, findings.get("semantic_review"), source_cache))
+    current_corpus = corpus_inputs(vault, manifest["vault_tag"], text, inputs["evidence_requirements"], actual, source_cache)
+    if pairs.get("corpus_inputs") != current_corpus:
+        raise RunError("final corpus inputs are missing or stale; re-extract and review every current corpus member")
+    coverage["evidence_counts"] = validate_corpus_review(pairs, findings["semantic_review"], findings.get("corpus_review"), source_cache)
     return coverage
 
 
@@ -1155,6 +1203,7 @@ def verify_run(vault, vault_tag: str) -> dict:
     profile = resolve_profile(manifest.get("profile", "full"), vault.config_path)
     run_dir = vault.run_dir(vault_tag)
     checks: list[dict] = []
+    evidence_counts = None
 
     def check(name: str, ok: bool, detail: str) -> None:
         checks.append({"name": name, "ok": bool(ok), "detail": detail})
@@ -1380,7 +1429,9 @@ def verify_run(vault, vault_tag: str) -> dict:
     if current_contract:
         try:
             coverage = _validate_final_audit(vault, manifest)
+            evidence_counts = coverage["evidence_counts"]
             check("finalization", True, f"final {coverage['coverage_mode']} audit: {coverage['reviewed']}/{coverage['selected']} selected; {coverage['unreviewed']} explicitly unreviewed")
+            check("qualified-evidence", True, json.dumps(evidence_counts, sort_keys=True))
         except (ValueError, OSError, UnicodeError, TypeError, KeyError) as exc:
             check("finalization", False, str(exc))
         try:
@@ -1393,6 +1444,8 @@ def verify_run(vault, vault_tag: str) -> dict:
     if inputs_before is not None:
         result["inputs"] = inputs_before
         result["input_digest"] = _digest(inputs_before)
+    if evidence_counts is not None:
+        result["evidence_counts"] = evidence_counts
     return result
 
 

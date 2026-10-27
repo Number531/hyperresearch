@@ -167,6 +167,23 @@ assertions and reasoned nonassertive spans must partition every unit's text.
 Require assertion-specific dispositions, scope, task/method reasoning and
 literal current original-body passages bound to local report citations.
 
+The same existing owner also follows **Corpus qualification corpus_review
+version 1** and retains `corpus_review` beside semantic_review in that envelope.
+Read the final pairs' `corpus_inputs`: every current-tagged member, including
+uncited notes, explicitly reused citations and resolved bibliography entries,
+current source/metadata/identity snapshots, informational raw claim rows and
+the exact frozen numeric gear requirements. Supply one qualification per
+member and current assertion_id-to-proposition_key mappings with evidence
+scope. Relevant adequate original excerpts can qualify; abstracts, metadata
+and secondary captures cannot meet the substantive-original source quota.
+Abstract-level facts and explicit secondary attribution may meet supported
+atomic minima under their bounded scope. API documentation is not independent
+measurement. Unknown/metadata-only support cannot clear any material empirical
+assertion merely because other evidence meets the totals. Repeated citations
+or paraphrases do not create new propositions; DOI/URL/body mirror ties cannot
+be overridden with different work IDs. Independent-work counts are separate
+and impose no additional minimum. No new checker or artifact is added.
+
 Empirical facts need cited evidence; partial, unsupported or unknown material
 assertions block. Clearly presented proposals, design parameters, pure
 stipulated arithmetic and bounded capture gaps may be uncited with explicit
@@ -178,7 +195,7 @@ Record applicable method judgments rather than generic assurances.
 
 Append every dangling occurrence exactly once as a critical finding. If pair
 work was explicitly sharded, exactly ONE designated owner must supply the
-complete semantic_review; native shard merging preserves it and rejects
+complete semantic_review and corpus_review; native shard merging preserves both and rejects
 duplicate owners. Never discard extensions or merge incomplete unit reviews.
 
 A current final critical or major finding cannot be cleared by a same-revision resolution log.
@@ -190,7 +207,11 @@ initial `cite-check-*` files. Never restamp final inputs or erase a finding to
 make the gate green. Run `{hpr_path} run finish <vault_tag> -j` after final
 coverage and whole-report review are complete and no current critical/major
 finding or blocking semantic judgment remains. Report/source/context changes
-invalidate the review. Quoted body text must occur in a locally cited original
+invalidate the review, including uncited corpus membership/body/metadata and
+evidence-requirement changes. Verification and approval never sync, ingest or
+rescore the database; a drift error requires explicit repair and fresh review.
+Old-note claims retain their original run tags and remain informational.
+Quoted body text must occur in a locally cited original
 body; an unrelated vault note cannot clear it. These checks validate recorded
 judgment, coverage and literal passages, not semantic truth, correct
 atomization or producer independence. Legacy/unknown policy runs refuse
