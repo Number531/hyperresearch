@@ -203,3 +203,29 @@ P2-SI-CASE, P2-TAG-ALIAS and sustained P1-Q-LONG closure, with zero open
 critical/major/minor findings. Parent reconciled the actual receipts and
 accepted P2. All three phases are now accepted locally; final aggregate
 comparison and final independent outcome verification remain outstanding.
+
+## Final aggregate comparison
+
+Clean tested checkpoint: `f30f7cfb0ffab52fc757b8231e9ea042b6b8071c`.
+FINAL-TEST: `python -m pytest tests/ -q`, exit1,145.835s. Exact failed-ID set
+matches the initial clean-base full suite: only the same two
+`test_crawl4ai_running_loop.py` cases named above. Parent independently compared
+both logs and confirmed the same `DNS lookup failed for 'example.com'` error
+fingerprint. No new failure; the suite is not represented as wholly green.
+Logs: `checks/FINAL/candidate/FULL/`. Final Ruff passed,0.198s in the identical
+isolated offline environment. No external research/model/search call was run.
+
+The plan structural validator again returned ok:true, transfer-ready, no
+findings, unchanged parsed-plan SHA82f96f43e72c1257671938283639dc9c09a34e678ec3c3a4f54ab40a4aab37fd.
+Product source is identical to the reviewed8ca38f2 correction; later commits
+added independent controls/evidence only. Main and origin/main remain at the
+initialf8ccd081 base. The task branch is clean, with no history rewrite.
+
+## Plan outcome (submitted for final independent verification)
+
+- Original objective: Implement the approved P0, P1 and P2 Hyperresearch semantic-verification hardening sequentially in a fresh workspace with offline tests and independent review, preserving historical results and existing worktrees.
+- Proposed result: Achieved, subject to final independent verification.
+- Acceptance: P0-AC-1, P1-AC-1 and P2-AC-1 satisfied;3/3. All phase checks and audits accepted, no open critical/major finding. The explicit aggregate no-new-failure criterion is satisfied with the two unchanged offline DNS failures disclosed.
+- Material deviations: current fresh base already contained upstream PR2–4, so overlapping gates were preserved rather than reimplemented. Producer step1 and bounded P1-Q-LONG remediation mapped to the approved seams. The initial readiness-wrapper sequencing issue is disclosed above. No acceptance signal or preservation boundary was weakened.
+- Deferred/unverified: real provider/model/research quality, reviewer truth and independent execution, semantic atomization/classification, and large real-vault performance were not tested. Recorded judgments remain distinct from automatic truth certification. No historical research replay, global installation, remote push/PR/merge or default-branch sync was performed or inferred.
+- Rollback/handoff: ordinary reviewed correction/revert on this task branch only; no reset/clean/force. This local branch is the deliverable. Remote publication/integration needs separate action-scoped authority.
