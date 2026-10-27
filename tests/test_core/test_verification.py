@@ -26,8 +26,8 @@ def _legacy_diagnostic_fixtures(request, monkeypatch):
     legacy = request.cls and request.cls.__name__ in {
         "TestCJKLengthCheck", "TestClassifiedTierArtifacts", "TestTelemetryAndVerify",
     }
-    legacy = legacy or (request.cls and request.cls.__name__ == "TestFinishGate"
-                        and request.function.__name__.startswith("test_cite_check_"))
+    if request.function.__name__ == "test_run_report_rollup":
+        legacy = False
     if legacy:
         original = init_run
 
@@ -38,6 +38,15 @@ def _legacy_diagnostic_fixtures(request, monkeypatch):
             return manifest
 
         monkeypatch.setattr(__import__(__name__, fromlist=["init_run"]), "init_run", legacy_init)
+
+
+def _historical_review_step(vault, tag):
+    """Author a synthetic stored step, then convert it to diagnostic-only history."""
+    path = vault.run_dir(tag) / "run.json"
+    manifest = json.loads(path.read_text())
+    manifest["steps"]["14.5"] = {"status": "done"}
+    manifest.pop("finalization_version", None)
+    path.write_text(json.dumps(manifest))
 
 
 def _assert_legacy_unverified(result):
@@ -105,6 +114,7 @@ def _complete_profile(vault, tag, profile="full"):
     for name, payload in json_outputs.items():
         (run / name).write_text(json.dumps(payload))
     (run / "prompt-decomposition.json").write_text(json.dumps({"pipeline_tier": profile,
+        "sub_questions": ["Chapter one question", "Chapter two question"],
         "response_format": "short", "required_section_headings": ["## Findings"]}))
     for role in ("dialectic", "depth", "width", "instruction"):
         (run / f"critic-findings-{role}.json").write_text('{"findings": []}')
@@ -116,7 +126,10 @@ def _complete_profile(vault, tag, profile="full"):
         "skipped": [], "edit_failures": [], "net_char_delta_actual": 0}))
     set_step(vault, tag, "1", "done")
     if profile == "dissertation":
-        plan = {"chapters": [{"id": cid, "title": cid, "atomic_items": [cid], "depends_on": []} for cid in ("ch1", "ch2")]}
+        plan = {"chapters": [{"id": cid, "title": cid,
+            "atomic_items": [["Chapter one question", "Chapter two question"][index]] + (["## Findings"] if index == 0 else []),
+            "atomic_item_refs": [f"/sub_questions/{index}"] + (["/required_section_headings/0"] if index == 0 else []),
+            "depends_on": []} for index, cid in enumerate(("ch1", "ch2"))]}
         (run / "chapter-plan.json").write_text(json.dumps(plan))
         for cid in ("ch1", "ch2"):
             record_event(vault, tag, {"type": "chapter-plan", "chapter": cid, "title": cid})
@@ -149,6 +162,168 @@ def _complete_profile(vault, tag, profile="full"):
     set_step(vault, tag, "16", "done")
     _write_supported_audit(vault, tag, report, final=True)
     return report
+
+
+class TestP0AcceptanceContract:
+    """Recorded review/state contracts, not an evaluation of reviewer truth."""
+
+    def test_fresh_run_uses_version_two(self, tmp_vault):
+        assert init_run(tmp_vault, "new-policy")["finalization_version"] == 2
+
+    @pytest.mark.parametrize("severity", ["critical", "major"])
+    def test_initial_blocking_findings_need_reviewed_success(self, cited_vault, severity):
+        from hyperresearch.core.citation_contracts import report_revision
+        from hyperresearch.core.runs import RunError
+
+        tag = f"initial-{severity}-p0"
+        report = _complete_profile(cited_vault, tag)
+        run = cited_vault.run_dir(tag)
+        set_step(cited_vault, tag, "14.5", "running")
+        pairs, payload = _write_supported_audit(cited_vault, tag, report)
+        pair = pairs["sampled_for_llm"][0]
+        payload["results"][0]["verdict"] = "partially-supported"
+        payload["findings"] = [{"pair_id": pair["pair_id"], "finding_id": pair["finding_id"],
+            "sentence": pair["sentence"], "cited_note_id": pair["note_id"], "correct_note_id": None,
+            "verdict": "partially-supported", "severity": severity,
+            "evidence": "Recorded scope mismatch.", "suggested_fix": "Remove the claim."}]
+        (run / "cite-check-findings.json").write_text(json.dumps(payload))
+        with pytest.raises(RunError):
+            set_step(cited_vault, tag, "14.5", "done")
+        log = {"schema_version": 1, "findings_report_revision": pairs["report_revision"],
+               "reviewed_report_revision": None, "resolutions": [], "applied": [{"finding_id": pair["finding_id"]}]}
+        path = run / "cite-check-patch-log.json"
+        path.write_text(json.dumps(log))
+        with pytest.raises(RunError):
+            set_step(cited_vault, tag, "14.5", "done")
+        report.write_text(report.read_text().replace(pair["sentence"], "", 1))
+        log.update({"reviewed_report_revision": report_revision(report.read_bytes()), "resolutions": [{
+            "finding_id": pair["finding_id"], "status": "resolved", "review_verdict": "claim-removed",
+            "evidence": "Recorded reread of the corrected report; assigned occurrence removed."}]})
+        path.write_text(json.dumps(log))
+        assert set_step(cited_vault, tag, "14.5", "done")["steps"]["14.5"]["completion"]
+
+    @pytest.mark.parametrize("severity", ["critical", "major"])
+    def test_current_final_blocking_findings_require_repair_and_reextraction(self, cited_vault, severity):
+        from hyperresearch.core.runs import finish_run
+
+        tag = f"final-{severity}-p0"
+        report = _complete_profile(cited_vault, tag, "light")
+        run = cited_vault.run_dir(tag)
+        pairs, payload = _write_supported_audit(cited_vault, tag, report, final=True)
+        pair = pairs["sampled_for_llm"][0]
+        payload["results"][0]["verdict"] = "partially-supported"
+        payload["findings"] = [{"pair_id": pair["pair_id"], "finding_id": pair["finding_id"],
+            "sentence": pair["sentence"], "cited_note_id": pair["note_id"], "correct_note_id": None,
+            "verdict": "partially-supported", "severity": severity,
+            "evidence": "Recorded scope mismatch.", "suggested_fix": "Remove the claim."}]
+        (run / "final-cite-check-findings.json").write_text(json.dumps(payload))
+        (run / "final-cite-check-patch-log.json").write_text(json.dumps({"schema_version": 1,
+            "findings_report_revision": pairs["report_revision"], "reviewed_report_revision": pairs["report_revision"],
+            "resolutions": [{"finding_id": pair["finding_id"], "status": "resolved", "review_verdict": "supported",
+                             "evidence": "A same-byte log cannot erase the current negative review."}]}))
+        result = finish_run(cited_vault, tag)
+        assert not result["verify"]["passed"]
+        assert "correction" in next(check["detail"] for check in result["verify"]["checks"] if check["name"] == "finalization")
+        report.write_text(report.read_text().replace(pair["sentence"], "", 1))
+        set_step(cited_vault, tag, "16", "running")
+        set_step(cited_vault, tag, "16", "done")
+        assert not finish_run(cited_vault, tag)["verify"]["passed"]
+        _write_supported_audit(cited_vault, tag, report, final=True)
+        assert finish_run(cited_vault, tag)["verify"]["passed"]
+
+    def test_late_tier_downgrade_cannot_change_frozen_route(self, cited_vault):
+        from hyperresearch.core.runs import RunError, finish_run, load_manifest, run_resume_position
+
+        tag = "late-downgrade-p0"
+        _complete_profile(cited_vault, tag)
+        run = cited_vault.run_dir(tag)
+        decomp = json.loads((run / "prompt-decomposition.json").read_text())
+        decomp["pipeline_tier"] = "light"
+        (run / "prompt-decomposition.json").write_text(json.dumps(decomp))
+        manifest = load_manifest(cited_vault, tag)
+        assert "14.5" in manifest["resolved_profile_steps"]
+        set_step(cited_vault, tag, "12", "running")
+        assert run_resume_position(cited_vault, load_manifest(cited_vault, tag))["next_step"] == "12"
+        with pytest.raises(RunError, match="tier"):
+            set_step(cited_vault, tag, "1", "done")
+        result = finish_run(cited_vault, tag)
+        assert not result["verify"]["passed"]
+        assert any("tier" in check["detail"] for check in result["verify"]["checks"] if not check["ok"])
+
+    @pytest.mark.parametrize("mutation", ["missing", "duplicate", "unknown", "nonstring", "empty", "changed-value", "missing-entity-field"])
+    def test_chapter_atomic_items_are_exact_once_decomposition_references(self, tmp_vault, mutation):
+        from hyperresearch.core.runs import RunError, _chapter_plan, load_manifest, record_event
+
+        tag = "partition-p0"
+        init_run(tmp_vault, tag, profile="dissertation")
+        run = tmp_vault.run_dir(tag)
+        decomposition = {"pipeline_tier": "dissertation", "sub_questions": ["Same text", "Same text"],
+            "entities": [{"name": "Entity", "required_fields": ["mechanism"]}],
+            "required_formats": ["table"], "required_section_headings": ["## Findings"]}
+        (run / "prompt-decomposition.json").write_text(json.dumps(decomposition))
+        refs = ["/sub_questions/0", "/sub_questions/1", "/entities/0/name", "/entities/0/required_fields/0",
+                "/required_formats/0", "/required_section_headings/0"]
+        values = ["Same text", "Same text", "Entity", "mechanism", "table", "## Findings"]
+        chapters = [{"id": "ch1", "title": "One", "atomic_items": values[:2], "atomic_item_refs": refs[:2], "depends_on": []},
+                    {"id": "ch2", "title": "Two", "atomic_items": values[2:], "atomic_item_refs": refs[2:], "depends_on": []}]
+        for chapter in chapters:
+            record_event(tmp_vault, tag, {"type": "chapter-plan", "chapter": chapter["id"], "title": chapter["title"]})
+        path = run / "chapter-plan.json"
+        path.write_text(json.dumps({"chapters": chapters}))
+        assert _chapter_plan(tmp_vault, load_manifest(tmp_vault, tag)) == chapters
+        if mutation == "missing":
+            chapters[0]["atomic_items"].pop()
+            chapters[0]["atomic_item_refs"].pop()
+        elif mutation == "duplicate":
+            chapters[1]["atomic_items"].append(values[0])
+            chapters[1]["atomic_item_refs"].append(refs[0])
+        elif mutation == "unknown":
+            chapters[0]["atomic_item_refs"][0] = "/sub_questions/9"
+        elif mutation == "nonstring":
+            chapters[0]["atomic_item_refs"][0] = {"item": refs[0]}
+        elif mutation == "empty":
+            chapters[0]["atomic_items"] = []
+            chapters[0]["atomic_item_refs"] = []
+        elif mutation == "changed-value":
+            chapters[0]["atomic_items"][0] = "Altered question"
+        else:
+            chapters[1]["atomic_items"].pop(1)
+            chapters[1]["atomic_item_refs"].pop(1)
+        path.write_text(json.dumps({"chapters": chapters}))
+        with pytest.raises(RunError, match="atomic"):
+            _chapter_plan(tmp_vault, load_manifest(tmp_vault, tag))
+
+    def test_one_chapter_partition_is_valid(self, tmp_vault):
+        from hyperresearch.core.runs import _chapter_plan, load_manifest, record_event
+
+        tag = "one-chapter-p0"
+        init_run(tmp_vault, tag, profile="dissertation")
+        run = tmp_vault.run_dir(tag)
+        (run / "prompt-decomposition.json").write_text(json.dumps({"pipeline_tier": "dissertation", "sub_questions": ["One question"]}))
+        chapter = {"id": "ch1", "title": "One", "atomic_items": ["One question"],
+                   "atomic_item_refs": ["/sub_questions/0"], "depends_on": []}
+        record_event(tmp_vault, tag, {"type": "chapter-plan", "chapter": "ch1", "title": "One"})
+        (run / "chapter-plan.json").write_text(json.dumps({"chapters": [chapter]}))
+        assert _chapter_plan(tmp_vault, load_manifest(tmp_vault, tag)) == [chapter]
+
+    def test_chapter_atomic_item_json_types_are_preserved(self, tmp_vault):
+        from hyperresearch.core.runs import RunError, _chapter_plan, load_manifest, record_event
+
+        tag = "chapter-json-types-p0"
+        init_run(tmp_vault, tag, profile="dissertation")
+        run = tmp_vault.run_dir(tag)
+        period = {"period": "FY 2025", "duration": 1}
+        (run / "prompt-decomposition.json").write_text(json.dumps({"pipeline_tier": "dissertation", "time_periods": [period]}))
+        chapter = {"id": "ch1", "title": "One", "atomic_items": [period],
+                   "atomic_item_refs": ["/time_periods/0"], "depends_on": []}
+        record_event(tmp_vault, tag, {"type": "chapter-plan", "chapter": "ch1", "title": "One"})
+        path = run / "chapter-plan.json"
+        path.write_text(json.dumps({"chapters": [chapter]}))
+        assert _chapter_plan(tmp_vault, load_manifest(tmp_vault, tag)) == [chapter]
+        chapter["atomic_items"][0]["duration"] = True  # Python considers True == 1; JSON distinguishes them.
+        path.write_text(json.dumps({"chapters": [chapter]}))
+        with pytest.raises(RunError, match="atomic"):
+            _chapter_plan(tmp_vault, load_manifest(tmp_vault, tag))
 
 
 @pytest.fixture
@@ -913,7 +1088,7 @@ class TestFinishGate:
                 "Substantive sentence with real evidence attached [[src-note]]. " * 80
             )
         report.write_text(body, encoding="utf-8")
-        if complete and manifest.get("finalization_version") == 1:
+        if complete and manifest.get("finalization_version") in {1, 2}:
             from hyperresearch.core.note import write_note
             from hyperresearch.core.sync import compute_sync_plan, execute_sync
 
@@ -1061,15 +1236,14 @@ class TestFinishGate:
 
     def test_cite_check_findings_accepts_both_shapes(self, tmp_vault):
         """Legacy shapes remain readable, but log presence proves no resolution."""
-        from hyperresearch.core.runs import set_step
 
         for tag, payload in (
             ("fin-07", {"findings": [{"severity": "critical", "verdict": "unsupported"}]}),
             ("fin-08", [{"severity": "critical", "verdict": "unsupported"}]),
         ):
-            self._well_formed_light_run(tmp_vault, tag)
+            self._well_formed_light_run(tmp_vault, tag, complete=False)
             run_dir = tmp_vault.run_dir(tag)
-            set_step(tmp_vault, tag, "14.5", "done")
+            _historical_review_step(tmp_vault, tag)
             (run_dir / "cite-check-findings.json").write_text(
                 json.dumps(payload), encoding="utf-8"
             )
@@ -1086,8 +1260,8 @@ class TestFinishGate:
     @pytest.mark.parametrize("payload", [{}, {"findings": None}, {"findings": {}}, 1, [1]])
     def test_cite_check_rejects_malformed_payload_cleanly(self, tmp_vault, payload):
         tag = "malformed-citations"
-        self._well_formed_light_run(tmp_vault, tag)
-        set_step(tmp_vault, tag, "14.5", "done")
+        self._well_formed_light_run(tmp_vault, tag, complete=False)
+        _historical_review_step(tmp_vault, tag)
         (tmp_vault.run_dir(tag) / "cite-check-findings.json").write_text(
             json.dumps(payload), encoding="utf-8"
         )
@@ -1097,8 +1271,8 @@ class TestFinishGate:
     @pytest.mark.parametrize("payload", [[], {"findings": []}])
     def test_cite_check_legacy_empty_is_diagnostic_without_rewriting(self, tmp_vault, payload):
         tag = "legacy-zero"
-        self._well_formed_light_run(tmp_vault, tag)
-        set_step(tmp_vault, tag, "14.5", "done")
+        self._well_formed_light_run(tmp_vault, tag, complete=False)
+        _historical_review_step(tmp_vault, tag)
         path = tmp_vault.run_dir(tag) / "cite-check-findings.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
         before = path.read_bytes()
@@ -1114,7 +1288,7 @@ class TestFinishGate:
         from hyperresearch.core.citecheck import write_pairs_file
 
         tag = "reviewed-critical"
-        report = self._well_formed_light_run(tmp_vault, tag)
+        report = self._well_formed_light_run(tmp_vault, tag, complete=False)
         run_dir = tmp_vault.run_dir(tag)
         pairs = write_pairs_file(tmp_vault, tag, report)
         pair = pairs["pairs"][0]
@@ -1128,7 +1302,7 @@ class TestFinishGate:
             }],
         }
         (run_dir / "cite-check-findings.json").write_text(json.dumps(findings), encoding="utf-8")
-        set_step(tmp_vault, tag, "14.5", "done")
+        _historical_review_step(tmp_vault, tag)
 
         def citation_check():
             return next(c for c in verify_run(tmp_vault, tag)["checks"] if c["name"] == "cite-check-resolved")
@@ -1162,20 +1336,20 @@ class TestFinishGate:
     @pytest.mark.parametrize("contents", [b"{", b"\xff"])
     def test_cite_check_invalid_json_or_encoding_fails_cleanly(self, tmp_vault, contents):
         tag = "unreadable-citations"
-        self._well_formed_light_run(tmp_vault, tag)
-        set_step(tmp_vault, tag, "14.5", "done")
+        self._well_formed_light_run(tmp_vault, tag, complete=False)
+        _historical_review_step(tmp_vault, tag)
         (tmp_vault.run_dir(tag) / "cite-check-findings.json").write_bytes(contents)
         by_name = {c["name"]: c for c in verify_run(tmp_vault, tag)["checks"]}
         assert by_name["cite-check-resolved"]["ok"] is False
 
-    def test_cite_check_major_only_application_log_needs_no_resolution_review(self, cited_vault):
+    def test_cite_check_major_application_log_cannot_prove_resolution(self, cited_vault):
         from hyperresearch.core.citecheck import write_pairs_file
 
         tag = "major-only"
         body = "## Findings\n\n" + (
             "Sources provide limited evidence about the current claim [[python-async-patterns]]. " * 80
         )
-        report = self._well_formed_light_run(cited_vault, tag, body)
+        report = self._well_formed_light_run(cited_vault, tag, body, complete=False)
         run_dir = cited_vault.run_dir(tag)
         pairs = write_pairs_file(cited_vault, tag, report)
         pair = pairs["pairs"][0]
@@ -1196,10 +1370,10 @@ class TestFinishGate:
             "conflicts": [], "orchestrator_escalated": [],
         }
         (run_dir / "cite-check-patch-log.json").write_text(json.dumps(log), encoding="utf-8")
-        set_step(cited_vault, tag, "14.5", "done")
+        _historical_review_step(cited_vault, tag)
         by_name = {c["name"]: c for c in verify_run(cited_vault, tag)["checks"]}
-        assert by_name["cite-check-resolved"]["ok"] is True, by_name["cite-check-resolved"]
-        # Claiming a review makes even optional noncritical records strict.
+        assert by_name["cite-check-resolved"]["ok"] is False, by_name["cite-check-resolved"]
+        # A claimed review must bind the actual known finding identity.
         from hyperresearch.core.citation_contracts import report_revision
 
         log["reviewed_report_revision"] = report_revision(report.read_bytes())
@@ -1600,7 +1774,7 @@ class TestFinalizationContract:
         assert status_summary(cited_vault, tag)["approval_current"] is False
         assert verify_run(cited_vault, tag)["passed"] is False
 
-    @pytest.mark.parametrize("version", [True, False, "1", 1.0, 2])
+    @pytest.mark.parametrize("version", [True, False, "2", 2.0, 1, 3])
     def test_finalization_discriminator_is_strict_and_read_only(self, tmp_vault, version):
         from hyperresearch.core.runs import finish_run, manifest_path
 
@@ -1676,7 +1850,7 @@ class TestFinalizationAuditCorrections:
 
     @pytest.mark.parametrize("command", ["verify", "finish", "status", "resume"])
     @pytest.mark.parametrize("db_state", ["old-schema", "missing-index", "missing-db"])
-    @pytest.mark.parametrize("version", [None, True, 2])
+    @pytest.mark.parametrize("version", [None, True, 1, 3])
     def test_legacy_cli_diagnostics_never_open_or_change_database(self, tmp_vault, monkeypatch, command, db_state, version):
         import sqlite3
 

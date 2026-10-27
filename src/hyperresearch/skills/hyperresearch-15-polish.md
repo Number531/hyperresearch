@@ -154,7 +154,7 @@ The final report lives at `research/notes/final_report_<vault_tag>.md`. The wrap
 - `research/runs/<vault_tag>/polish-log.json` populated
 - Required prior work and real output schemas are valid; no fabricated stubs
 - Lint gate passed
-- Record `{hpr_path} run step <vault_tag> 15 --status done -j` after polish. Full/premier/dissertation require completed initial 14.5 review first.
+- Record `{hpr_path} run step <vault_tag> 15 --status done -j` after polish. Full/premier/dissertation require completed initial 14.5 review first, including successful reviewed resolutions for all critical and major citation findings.
 - Continue to step 16, then the separate final citation audit and `run finish`; polish alone does not ship.
 
 ---

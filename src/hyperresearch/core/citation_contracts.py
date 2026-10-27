@@ -194,7 +194,7 @@ def bind_findings(findings: FindingsDocument, pairs: PairsDocument) -> None:
 def validate_resolutions(
     findings: FindingsDocument, payload: object, current_report_revision: str,
 ) -> None:
-    """Require explicit reviewed outcomes for every critical, never log presence.
+    """Require reviewed outcomes for every critical/major, never log presence.
 
     The findings revision names the original audit input. The reviewed revision
     names the post-patch report, which may legitimately have different bytes.
@@ -209,11 +209,11 @@ def validate_resolutions(
         raise CitationContractError("resolution findings_report_revision is stale/unrelated")
     records = _records(payload.get("resolutions"), "resolutions")
     known = {item["finding_id"]: item for item in findings.findings}
-    criticals = {identity for identity, item in known.items() if item["severity"] == "critical"}
-    # Noncritical-only patch passes use this canonical application stub and
+    blocking = {identity for identity, item in known.items() if item["severity"] in {"critical", "major"}}
+    # Minor-only patch passes use this canonical application stub and
     # need no additional review. Any recorded outcome or claimed review still
     # receives strict revision/identity validation below.
-    if not criticals and not records and payload.get("reviewed_report_revision") is None:
+    if not blocking and not records and payload.get("reviewed_report_revision") is None:
         return
     reviewed = _revision(payload.get("reviewed_report_revision"), "reviewed_report_revision")
     if reviewed != _revision(current_report_revision):
@@ -234,9 +234,9 @@ def validate_resolutions(
             if verdict not in {"supported", "claim-removed"}:
                 raise CitationContractError("resolved finding requires a successful reviewed outcome")
             resolved.add(identity)
-    missing = criticals - resolved
+    missing = blocking - resolved
     if missing:
-        raise CitationContractError(f"{len(missing)} critical finding(s) lack reviewed resolution")
+        raise CitationContractError(f"{len(missing)} critical/major finding(s) lack reviewed resolution")
 
 
 def source_input(vault, note_id: str, cache: dict | None = None) -> tuple[dict, str | None]:

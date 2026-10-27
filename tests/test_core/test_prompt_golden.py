@@ -8,6 +8,9 @@ or template deliberately requires updating the golden, which makes prompt
 changes reviewable instead of silent.
 
 Deliberate deviations already folded into the goldens (2026-07-19):
+  - Fresh-run v2 policy (2026-10-27): freeze the resolved route at stage 1;
+    require reviewed major as well as critical initial resolutions and real
+    correction of current final major findings; preserve legacy diagnostics.
   - Finalization integrity (2026-10-27): separate final citation audit after
     completed final edits for every tier; initial review evidence is preserved,
     explicit final-audit/finish actions replace artifact-existence completion.

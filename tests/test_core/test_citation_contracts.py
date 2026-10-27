@@ -208,6 +208,31 @@ def test_known_noncritical_resolution_is_allowed(citation_artifacts):
     validate_resolutions(parse_findings(findings), log, current)
 
 
+@pytest.mark.parametrize("mutation", ["no-records", "unreviewed", "unresolved", "failed-review", "missing-evidence"])
+def test_major_findings_require_successful_reviewed_resolution(citation_artifacts, mutation):
+    _, findings, log, current = citation_artifacts
+    findings["findings"][0]["severity"] = "major"
+    if mutation == "no-records":
+        log["resolutions"] = []
+    elif mutation == "unreviewed":
+        log.update({"resolutions": [], "reviewed_report_revision": None})
+    elif mutation == "unresolved":
+        log["resolutions"][0].update({"status": "unresolved", "review_verdict": "unresolved"})
+    elif mutation == "failed-review":
+        log["resolutions"][0]["review_verdict"] = "unresolved"
+    else:
+        log["resolutions"][0]["evidence"] = ""
+    with pytest.raises(CitationContractError):
+        validate_resolutions(parse_findings(findings), log, current)
+
+
+def test_minor_only_application_stub_remains_diagnostic(citation_artifacts):
+    _, findings, log, current = citation_artifacts
+    findings["findings"][0]["severity"] = "minor"
+    log.update({"resolutions": [], "reviewed_report_revision": None})
+    validate_resolutions(parse_findings(findings), log, current)
+
+
 def test_every_critical_needs_its_own_review(citation_artifacts):
     pairs, findings, log, current = citation_artifacts
     second_pair = copy.deepcopy(pairs["pairs"][0])

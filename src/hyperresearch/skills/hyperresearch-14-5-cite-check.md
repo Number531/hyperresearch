@@ -91,15 +91,15 @@ Use the validated merged envelope from 14.5.2, with each dangling finding alread
 {"schema_version": 1, "findings_report_revision": "<copy original findings revision>", "reviewed_report_revision": null, "resolutions": [], "total_findings": 0, "applied": [], "skipped": [], "conflicts": [], "orchestrator_escalated": []}
 ```
 
-Fix repertoire (in the findings' `suggested_fix`): swap to `correct_note_id`, soften the claim to what the source supports, or delete the sentence when nothing supports it. Same rules as step 14: surgical hunks, zero regeneration, `critical` findings must not be silently skipped.
+Fix repertoire (in the findings' `suggested_fix`): swap to `correct_note_id`, soften the claim to what the source supports, or delete the sentence when nothing supports it. Same rules as step 14: surgical hunks, zero regeneration, `critical` and `major` findings must not be silently skipped.
 
-The patcher records each `finding_id` in the application entries and preserves the revision fields. Applying or escalating a patch does not resolve a critical finding. The initial null review revision is intentionally unverified.
+The patcher records each `finding_id` in the application entries and preserves the revision fields. Applying or escalating a patch does not resolve a critical or major finding. The initial null review revision is intentionally unverified.
 
 **Skip the pass entirely** when the merged envelope's `findings` is `[]`.
 
-## Step 14.5.4 — Review critical resolutions
+## Step 14.5.4 — Review critical and major resolutions
 
-If any critical findings exist, spawn the `hyperresearch-cite-checker` again with `mode: resolution-review`, the original `pairs_file`, `findings_input_path: research/runs/<vault_tag>/cite-check-findings.json`, `draft_path: research/notes/final_report_<vault_tag>.md`, and the existing `patch_log_path: research/runs/<vault_tag>/cite-check-patch-log.json`. Wait for it to reread the patched report and relevant source bodies. It must preserve application data and populate:
+If any critical or major findings exist, spawn the `hyperresearch-cite-checker` again with `mode: resolution-review`, the original `pairs_file`, `findings_input_path: research/runs/<vault_tag>/cite-check-findings.json`, `draft_path: research/notes/final_report_<vault_tag>.md`, and the existing `patch_log_path: research/runs/<vault_tag>/cite-check-patch-log.json`. Wait for it to reread the patched report and relevant source bodies. It must preserve application data and populate:
 
 ```json
 {
@@ -112,10 +112,10 @@ If any critical findings exist, spawn the `hyperresearch-cite-checker` again wit
 }
 ```
 
-`claim-removed` is also a successful review verdict when the claim was actually removed. Otherwise use `status: "unresolved"`, `review_verdict: "unresolved"`, explain the blocker, and fix/review again before marking the step done. Every critical needs exactly one successful resolution; records for other known findings are permitted. Unknown or duplicate IDs, stale original/reviewed revisions, and `applied` entries alone fail the native gate. Use the checker's byte-hash procedure; the shared native identity API lives in `hyperresearch.core.citation_contracts`.
+`claim-removed` is also a successful review verdict when the claim was actually removed. Otherwise use `status: "unresolved"`, `review_verdict: "unresolved"`, explain the blocker, and fix/review again before marking the step done. Every critical and major finding needs exactly one successful resolution; records for other known findings are permitted. Unknown or duplicate IDs, stale original/reviewed revisions, and `applied` entries alone fail the native gate. Use the checker's byte-hash procedure; the shared native identity API lives in `hyperresearch.core.citation_contracts`.
 
 **Complete the initial review now:** `run step <vault_tag> 14.5 --status done -j`
-validates coverage, source bytes and critical resolution against the then-current
+validates coverage, source bytes and critical/major resolution against the then-current
 report and records bounded hashes in that existing step entry. Preserve these
 initial artifacts afterward. Later polish/readability edits receive a separate
 final audit; do not restamp the initial resolution log for later report bytes.
@@ -129,7 +129,7 @@ Do not rewrite legacy findings or patch logs merely to make verification pass. B
 - `research/runs/<vault_tag>/cite-check-pairs.json` exists
 - `research/runs/<vault_tag>/cite-check-findings.json` is a valid versioned envelope bound to the original pairs revision, with every selected result and all mandatory dangling findings
 - Native `validate_coverage` passes: exact selected IDs/results, declared sampled remainder or zero comprehensive remainder, and fresh source-body inputs
-- If any critical findings exist: `cite-check-patch-log.json` contains matching explicit successful resolution reviews bound to the current post-patch report bytes
+- If any critical or major findings exist: `cite-check-patch-log.json` contains matching explicit successful resolution reviews bound to the current post-patch report bytes
 - Manifest: `{hpr_path} run step <vault_tag> 14.5 --status done -j`
 
 ## Next step
@@ -156,12 +156,12 @@ retain/merge every selected ID, verdict and evidence record. Append every
 dangling occurrence exactly once as a critical finding. Final selected/body
 coverage obeys the same strict versioned contract as initial review.
 
-A current final critical cannot be cleared by a same-revision resolution log.
+A current final critical or major finding cannot be cleared by a same-revision resolution log.
 Correct the report/source, reenter final editing when report bytes change
 (`run step <vault_tag> 16 --status running`, perform the affected review/edits,
 then `--status done`), extract again and review the fresh selected pairs.
 If application notes are needed, use `final-cite-check-patch-log.json`; preserve
 initial `cite-check-*` files. Never restamp final inputs or erase a finding to
 make the gate green. Run `{hpr_path} run finish <vault_tag> -j` after final
-coverage is complete and no current critical remains. This validates recorded
+coverage is complete and no current critical or major finding remains. This validates recorded
 coverage/literal passages, not semantic truth or producer independence.

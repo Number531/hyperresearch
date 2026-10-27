@@ -43,6 +43,7 @@ Read these inputs:
          "id": "ch1",
          "title": "<chapter title — becomes the H1 in the final document>",
          "atomic_items": ["<verbatim items from the decomposition>"],
+         "atomic_item_refs": ["/sub_questions/0"],
          "rationale": "<1-2 sentences: why these items cohere>",
          "depends_on": []
        }
@@ -50,6 +51,18 @@ Read these inputs:
    }
    ```
    `depends_on` lists chapters whose findings this chapter builds on (usually empty; used to order execution).
+
+   Keep `atomic_item_refs` aligned one-to-one with the verbatim `atomic_items`.
+   Use JSON-pointer occurrence identities: every entry in `sub_questions`,
+   `required_formats`, `required_sections`, `required_section_headings`,
+   `time_horizons`, `time_periods`, and `scope_conditions` uses `/<field>/<index>`.
+   Each entity object contributes `/entities/<index>/name` plus every
+   `/entities/<index>/required_fields/<index>`; a string entity uses
+   `/entities/<index>`. Time-period objects are copied whole. Every reference
+   must occur exactly once across all chapters and its value must match the
+   decomposition exactly. Repeated text still has separate occurrence references.
+   Empty chapter assignments, omitted obligations and invented items fail the
+   native partition check. A one-chapter degeneration remains valid.
 
 3. **Scaffold chapter workspaces.** For each chapter, create `research/runs/<vault_tag>/chapters/<id>/` with an empty `temp/` subdirectory. Chapter-scoped step artifacts (loci.json, comparisons.md, claims, drafts) live there; the flat run-root copies are NOT used on chaptered runs.
 

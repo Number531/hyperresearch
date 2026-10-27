@@ -85,6 +85,11 @@ When you invoke a Skill, that skill's full procedure is loaded into your context
 
 Step 1 classifies the query into a `pipeline_tier` (`light` / `full`). The tier is written to `research/runs/<vault_tag>/prompt-decomposition.json`. After step 1, **read that file** to learn the tier, then sequence steps according to:
 
+Resolve any reclassification before marking stage 1 done. That completion freezes
+`resolved_pipeline_tier` and `resolved_profile_steps` in the manifest. Later edits
+to the decomposition cannot downgrade or replace this run's route; use a new run
+for a different route. The initialized profile still supplies the scale gear.
+
 | Tier | Steps that run | Typical time |
 |------|---|---|
 | `light` | 1 → 2 → 10 (single draft) → 15 → 16 → final citation audit → finish | << light.time_estimate >> |
@@ -251,7 +256,7 @@ If you're ever uncertain what to do next, the answer is: re-read this file and f
 All tiers, including light, receive a separate final citation audit after all edits.
 Keep the initial `cite-check-*` artifacts from step 14.5 unchanged. For full,
 premier and dissertation, step 14.5's completion records its then-current
-coverage and reviewed critical resolutions. That historical snapshot survives
+coverage and reviewed critical/major resolutions. That historical snapshot survives
 legitimate polish; it is not approval of the final report.
 
 1. Ensure required stages are recorded **done**, with their real outputs.
@@ -279,7 +284,7 @@ legitimate polish; it is not approval of the final report.
    paths and merge without dropping any result. Sampled coverage may retain
    its declared weak remainder; call it unreviewed. Use
    `--coverage-mode comprehensive` only when every pair will be reviewed.
-4. Any current final **critical** finding requires a real report/source
+4. Any current final **critical or major** finding requires a real report/source
    correction followed by fresh extraction and reviewed results. A same-byte
    resolution log cannot clear it. If the report changed, rerun the affected
    final-edit work (at least step 16 running/done) before extracting again.
@@ -297,7 +302,11 @@ bodies. Its existing manifest receipt binds the report, stages, outputs,
 profile/config and blocking lint outcomes. Mutations during verification or
 persistence reject approval. `run status`/`run resume` identify stale approvals;
 a current session's Stop hook cannot treat numbered flags alone as finish.
-Legacy manifests remain read-only diagnostics, never current approval.
+Fresh runs use finalization version 2. Version-1 and unversioned manifests remain
+read-only diagnostics, never current approval; do not migrate or re-finish them.
+Step, event, spend and status mutations are refused for these old contracts.
+These gates validate the recorded evidence contract, not semantic truth or
+proof of independent producer work.
 
 **The gate's verdict is binding.** Correct the named report, source or stage
 work, regenerate the final audit for changed inputs, and rerun finish. For a

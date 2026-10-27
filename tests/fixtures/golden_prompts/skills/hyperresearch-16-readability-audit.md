@@ -172,7 +172,8 @@ Return to the entry skill's **Final integrity gate**: run
 final selected-pair review in `final-cite-check-findings.json`, then run
 `{hpr_path} run finish <vault_tag> -j`. Preserve initial citation artifacts.
 
-If later corrections change the report, reenter the affected final-edit work
+A current final critical or major finding blocks finish until correction and
+fresh extraction/review. If later corrections change the report, reenter the affected final-edit work
 with step 16 running/done, then extract and review fresh final pairs. Repeating
 a done flag without renewed work cannot restamp changed inputs. Only a current
 successful finish permits shipping; after 3 failed correction rounds leave the

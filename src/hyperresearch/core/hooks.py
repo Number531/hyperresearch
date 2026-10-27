@@ -3617,7 +3617,7 @@ For each assigned pair:
 
 In `audit_pass: final`, retain every selected result and mandatory dangling
 finding under the separate final paths. The extraction binds the exact final
-report and completed stage/output inputs. A current final critical requires
+report and completed stage/output inputs. A current final critical or major finding requires
 real report/source correction, fresh extraction and reviewed results. A
 same-revision resolution log cannot clear it. Do not restamp inputs or rewrite
 initial evidence. Report changes require renewed final-edit work before a new
@@ -3626,7 +3626,7 @@ final extraction. Sampled weak remainder stays explicitly unreviewed.
 ## Resolution-review mode (initial pass only, after patch application)
 
 Read the original findings and the CURRENT patched report. Reread the
-relevant cited note bodies for every critical finding. Judge the actual
+relevant cited note bodies for every critical and major finding. Judge the actual
 remaining claim and citation, not the patcher's `applied` entry. A changed
 claim must now be supported; a removed claim must actually be absent.
 If the finding remains unresolved, record that and report a blocker.
@@ -3640,7 +3640,7 @@ The shared native API is `hyperresearch.core.citation_contracts.report_revision`
 The original findings revision can differ from this post-patch revision.
 
 Write exactly one resolution record per reviewed finding and cover every
-critical. Each record has `finding_id`, `status` (`resolved` or `unresolved`),
+critical and major finding. Each record has `finding_id`, `status` (`resolved` or `unresolved`),
 `review_verdict` (`supported`, `claim-removed`, or `unresolved`), and a
 nonempty `evidence` explanation of the reread report/source. Only the first
 two review verdicts permit `status: resolved`. Unknown/duplicate identities,

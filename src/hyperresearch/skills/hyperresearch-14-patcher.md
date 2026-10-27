@@ -162,6 +162,10 @@ For each entry:
 
 Return to the entry skill (`hyperresearch`). Invoke step 14.5 (cite-check):
 
+The citation-specific pass requires successful reviewed resolutions for every
+critical and major citation finding. Patcher application entries alone cannot
+complete that review.
+
 ```
 <% if platform == "codex" %>cat .hyperresearch/codex/steps/hyperresearch-14-5-cite-check.md<% else %>Skill(skill: "hyperresearch-14-5-cite-check")<% endif %>
 ```

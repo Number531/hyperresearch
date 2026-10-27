@@ -326,6 +326,7 @@ hyperresearch run verify <tag> -j    # Ship gate: headings, length, citation den
 
 ## What's structurally enforced
 
+- **Fresh-run finalization contract.** New runs use version 2; version-1 and unversioned runs remain read-only diagnostics without migration or re-finish. Stage 1 freezes the resolved route. Chapter assignments retain verbatim items and exact-once decomposition references. Initial critical and major citation findings require successful reviewed resolutions; current final critical or major findings require correction and fresh extraction. These checks validate recorded evidence, not semantic truth or reviewer independence.
 - **Verbatim prompt as gospel.** `scaffold-prompt` lint blocks if the scaffold doesn't open with the user's exact prompt
 - **Locus coverage.** Every step 4 locus must have a step 5 interim note; missing interims flag as errors
 - **Patch-only modification.** Steps 14, 15, 16 are tool-locked to `[Read, Edit]`. They cannot regenerate the draft
