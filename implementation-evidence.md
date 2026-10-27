@@ -105,3 +105,10 @@ passed all 62 cases in 3.287s. P1-LINT passed, 0.082s. See
 Recorded classifications, atomization, entailment and reviewer identity remain
 judgments, not machine-certified truth/independence. P2 quotas are not yet
 implemented. Independent phase audit follows the local checkpoint.
+
+P1 checkpoint: `b24da9b046e5c662ddd3b45dfbcbc64372b772ef`.
+Fresh auditor `semantic_p1_phase_audit` reviewed the complete range, tests,
+instructions and original results; zero critical/major/minor findings. Its
+independent selection ran on the clean audited checkpoint: 42 passed, exit 0,
+2.901s (`checks/P1/audit/INDEPENDENT-PROBES/output.log`). Parent reconciled and
+accepted P1, retaining the recorded-judgment limitations. P2 was excluded.
