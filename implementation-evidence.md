@@ -239,3 +239,17 @@ declared no-new-failure criterion. Preservation/no-live/global/remote claims
 are supported by execution evidence and changed-path inspection, not forensic
 inspection of historical vaults or external state. This final evidence-only
 checkpoint changes no product source, tests or previously validated outcome.
+
+## Subsequent publication authorization
+
+After the local handoff, the user explicitly approved pushing this P0–P2 branch,
+opening its PR and merging with a merge commit after CI and independent review
+pass. Exact binding: `Number531/hyperresearch`, head
+`codex/hyperresearch-semantic-verification-20261027`, base `main`. All five
+existing CI matrix jobs must succeed on the final head, and a fresh independent
+PR audit must have no unresolved critical/major finding before merge. This
+grant permits normal non-force task pushes and matching PR updates; no research
+reruns, historical-result changes, dirty-worktree changes, local default-branch
+sync, release, deployment or history rewrite. The original local-only handoff
+and its failure receipts above remain historical evidence. No product or test
+change accompanies this authorization record.
