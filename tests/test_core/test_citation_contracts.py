@@ -360,6 +360,10 @@ def test_positive_passages_cannot_come_from_frontmatter(coverage_artifacts, verd
     b"---\nclaim: metadata-only claim\n",
     b"---\nclaim: [metadata-only claim\n---\n",
     b"---\nclaim: metadata-only claim\n---metadata-only claim\n",
+    "---\u00a0\n- metadata-only claim\n---\n".encode(),
+    b"---\v\n- metadata-only claim\n---\n",
+    "---\u2003\nmetadata-only claim\n---\n".encode(),
+    b"---\f\nclaim: metadata-only claim\n",
 ])
 @pytest.mark.parametrize("verdict", ["supported", "partially-supported"])
 def test_invalid_frontmatter_cannot_become_positive_body_evidence(seeded_vault, raw, verdict):

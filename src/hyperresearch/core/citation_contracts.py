@@ -283,16 +283,16 @@ def source_input(vault, note_id: str, cache: dict | None = None) -> tuple[dict, 
             # non-mapping YAML, and treats unclosed frontmatter as plain text.
             # Those diagnostic fallbacks must never qualify metadata as a
             # citation body. Keep its boundary/parser, with a scoped guard.
-            if re.match(r"^---(?:[ \t]*\r?\n|[ \t]*\Z)", text):
-                frontmatter = FRONTMATTER_RE.match(text)
-                if frontmatter is None:
-                    raise ValueError("unclosed source frontmatter")
+            frontmatter = FRONTMATTER_RE.match(text)
+            if frontmatter is not None:
                 closing_line = text[frontmatter.end(1) + 1:].splitlines()[0]
                 if closing_line.strip() != "---":
                     raise ValueError("malformed source frontmatter delimiter")
                 metadata = yaml.safe_load(frontmatter.group(1))
                 if metadata is not None and not isinstance(metadata, dict):
                     raise ValueError("source frontmatter must be a mapping")
+            elif re.match(r"^---\s*(?:\n|\Z)", text):
+                raise ValueError("unclosed source frontmatter")
             _, body = parse_frontmatter(text)
         except (UnicodeError, ValueError, yaml.YAMLError):
             body = None
