@@ -38,6 +38,57 @@ def cited_vault(seeded_vault):
 
 
 class TestCiteCheckExtraction:
+    def test_unmapped_numbered_occurrences_are_never_dropped(self, cited_vault):
+        report = "Unknown [99]. Mixed [7, 99]. Repeated [99, 99].\n## Sources\n[7] Python Async Patterns. https://example.com/async\n"
+        pairs = extract_pairs(report, cited_vault.db)
+        assert len(pairs) == 5
+        assert sum(p["note_id"] is None for p in pairs) == 4
+        assert len({p["pair_id"] for p in pairs}) == 5
+
+    def test_mechanical_match_is_only_a_candidate(self, cited_vault):
+        pairs = extract_pairs("Async improves throughput by 10x [[python-async-patterns]].", cited_vault.db)
+        triaged = triage_pairs(pairs, cited_vault.db)
+        assert pairs[0]["verdict"] == "needs-llm"
+        assert triaged["evidence_candidates"] == 1
+        assert sample_needs_llm(pairs) == pairs
+
+    def test_missing_selected_results_cannot_establish_coverage(self, cited_vault):
+        from hyperresearch.core.citation_contracts import CitationContractError, validate_coverage
+        from hyperresearch.core.citecheck import write_pairs_file
+
+        report = cited_vault.notes_dir / "coverage.md"
+        report.write_text("Async gives 10x throughput [[python-async-patterns]].", encoding="utf-8")
+        pairs = write_pairs_file(cited_vault, "coverage-red", report)
+        with pytest.raises(CitationContractError, match="results"):
+            validate_coverage(pairs, {"schema_version": 1, "report_revision": pairs["report_revision"], "findings": []}, cited_vault)
+
+    @pytest.mark.parametrize(("claim", "source", "tokens"), [
+        ("The difference is +255", "The difference is -255", ["+255"]),
+        ("The difference is \u2212255", "The difference is +255", ["\u2212255"]),
+        ("The cost is 5bp", "The cost is 5%", ["5"]),
+        ("Correlation is .93", "F1 is .93", [".93"]),
+    ])
+    def test_numeric_sign_unit_and_metric_matches_never_establish_support(self, cited_vault, claim, source, tokens):
+        cited_vault.db.execute("UPDATE claims SET claim = ?, quoted_support = ?, numbers = ?", (source, source, json.dumps(tokens)))
+        pairs = extract_pairs(f"{claim} [[python-async-patterns]].", cited_vault.db)
+        triage_pairs(pairs, cited_vault.db)
+        assert pairs[0]["numbers"] == tokens
+        assert pairs[0]["verdict"] == "needs-llm"
+        assert sample_needs_llm(pairs, 0) == pairs  # strong is selected, not reviewed
+
+    def test_six_word_overlap_is_only_a_routing_hint(self, cited_vault):
+        text = "Async syntax enables concurrent input and output"
+        cited_vault.db.execute("UPDATE claims SET claim = ?, quoted_support = '', numbers = '[]'", (text,))
+        pairs = extract_pairs(f"{text} [[python-async-patterns]].", cited_vault.db)
+        triage_pairs(pairs, cited_vault.db)
+        assert pairs[0]["routing_hints"] == ["word-overlap-candidate"]
+        assert pairs[0]["verdict"] == "needs-llm"
+
+    def test_mixed_styles_keep_occurrence_order_and_markers_are_not_quantities(self, cited_vault):
+        pairs = extract_pairs("Intro [[python-async-patterns]] then unknown [99] and [[rust-ownership]].", cited_vault.db)
+        assert [p["note_id"] for p in pairs] == ["python-async-patterns", None, "rust-ownership"]
+        assert all(not p["strong"] and p["numbers"] == [] for p in pairs)
+
     def test_wikilink_pairs(self, cited_vault):
         report = "Async gives a 10x gain [[python-async-patterns]]. Rust is safe [[rust-ownership]]."
         pairs = extract_pairs(report, cited_vault.db)
@@ -90,13 +141,13 @@ class TestCiteCheckExtraction:
         triaged = triage_pairs(pairs, cited_vault.db)
         assert triaged["dangling"] == 1
 
-    def test_triage_auto_passes_number_match(self, cited_vault):
+    def test_triage_retains_number_candidate_for_llm(self, cited_vault):
         pairs = extract_pairs(
             "Async improves throughput by 10x [[python-async-patterns]].", cited_vault.db
         )
         triaged = triage_pairs(pairs, cited_vault.db)
-        assert triaged["supported_mechanical"] == 1
-        assert triaged["needs_llm"] == 0
+        assert triaged["evidence_candidates"] == 1
+        assert triaged["needs_llm"] == 1
 
     def test_triage_flags_unsupported_for_llm(self, cited_vault):
         pairs = extract_pairs(
@@ -146,7 +197,7 @@ class TestCiteCheckExtraction:
         r = runner.invoke(app, ["citecheck", "extract", "cc-run", "--json"])
         assert r.exit_code == 0
         data = json.loads(r.stdout)["data"]
-        assert data["summary"]["supported_mechanical"] == 1
+        assert data["summary"]["evidence_candidates"] == 1
         assert data["dangling"] == 1
         assert (cited_vault.run_dir("cc-run") / "cite-check-pairs.json").exists()
 
@@ -741,6 +792,52 @@ class TestFinishGate:
         assert manifest["verify"]["passed"] is True
         assert manifest["verify"]["failed_checks"] == []
 
+    def test_comprehensive_finish_cannot_drop_an_unknown_occurrence(self, cited_vault):
+        from hyperresearch.core.citation_contracts import report_revision
+        from hyperresearch.core.citecheck import write_pairs_file
+        from hyperresearch.core.runs import finish_run
+
+        tag = "comprehensive-unknown"
+        unknown = "An unresolved claim has a missing numbered source [99]."
+        body = "## Findings\n\n" + (
+            "Substantive context discusses concurrent input and output [[python-async-patterns]]. " * 80
+        ) + unknown
+        report = self._well_formed_light_run(cited_vault, tag, body)
+        pairs = write_pairs_file(cited_vault, tag, report, coverage_mode="comprehensive")
+        assert len(pairs["dangling"]) == 1 and pairs["unreviewed_pair_ids"] == []
+        envelope = {"schema_version": 1, "report_revision": pairs["report_revision"],
+                    "selected_pair_ids": pairs["selected_pair_ids"], "findings": [], "results": [{
+                        "pair_id": pair["pair_id"], "verdict": "supported",
+                        "source_revision": pair["source_input"]["revision"],
+                        "source_excerpt": "Python's async/await syntax enables concurrent I/O.",
+                        "evidence": "Recorded source-body review fixture.",
+                    } for pair in pairs["sampled_for_llm"]]}
+        path = cited_vault.run_dir(tag) / "cite-check-findings.json"
+        path.write_text(json.dumps(envelope), encoding="utf-8")
+        set_step(cited_vault, tag, "14.5", "done")
+        blocked = finish_run(cited_vault, tag)
+        checks = {c["name"]: c for c in blocked["verify"]["checks"]}
+        assert checks["cite-check-coverage"]["ok"] is False
+        assert "dangling" in checks["cite-check-coverage"]["detail"]
+        assert blocked["manifest"]["status"] == "blocked"
+        pair = pairs["dangling"][0]
+        envelope["findings"] = [{
+            "pair_id": pair["pair_id"], "finding_id": pair["finding_id"],
+            "sentence": pair["sentence"], "cited_note_id": None, "correct_note_id": None,
+            "severity": "critical", "verdict": "dangling", "evidence": "No Sources mapping exists.",
+            "suggested_fix": "Remove the unsupported claim.",
+        }]
+        path.write_text(json.dumps(envelope), encoding="utf-8")
+        assert finish_run(cited_vault, tag)["verify"]["passed"] is False  # no reviewed resolution
+        report.write_text(body.replace(unknown, ""), encoding="utf-8")
+        log = {"schema_version": 1, "findings_report_revision": pairs["report_revision"],
+               "reviewed_report_revision": report_revision(report.read_bytes()), "resolutions": [{
+                   "finding_id": pair["finding_id"], "status": "resolved", "review_verdict": "claim-removed",
+                   "evidence": "Reread current report; the unknown-source claim is absent.",
+               }]}
+        (cited_vault.run_dir(tag) / "cite-check-patch-log.json").write_text(json.dumps(log), encoding="utf-8")
+        assert finish_run(cited_vault, tag)["verify"]["passed"] is True
+
     def test_finish_blocks_hallucinated_quote(self, tmp_vault):
         from hyperresearch.core.runs import finish_run, load_manifest
 
@@ -860,6 +957,8 @@ class TestFinishGate:
         by_name = {c["name"]: c for c in verify_run(tmp_vault, tag)["checks"]}
         assert by_name["cite-check-resolved"]["ok"] is True
         assert "diagnostic" in by_name["cite-check-resolved"]["detail"]
+        assert by_name["cite-check-coverage"]["ok"] is False
+        assert verify_run(tmp_vault, tag)["passed"] is False
         assert path.read_bytes() == before
 
     def test_cite_check_binds_original_findings_and_reviewed_patched_bytes(self, tmp_vault):

@@ -673,6 +673,7 @@ def verify_run(vault, vault_tag: str) -> dict:
             parse_findings,
             parse_pairs,
             report_revision,
+            validate_coverage,
             validate_resolutions,
         )
 
@@ -704,6 +705,21 @@ def verify_run(vault, vault_tag: str) -> dict:
             ok = False
             detail = f"citation artifacts invalid/unverified: {exc}"
         check("cite-check-resolved", ok, detail)
+        try:
+            coverage = validate_coverage(
+                json.loads((run_dir / "cite-check-pairs.json").read_text(encoding="utf-8-sig")),
+                json.loads(cc_findings.read_text(encoding="utf-8-sig")), vault,
+            )
+            coverage_ok = True
+            coverage_detail = (
+                f"{coverage['coverage_mode']} coverage; {coverage['reviewed']}/{coverage['selected']} "
+                f"selected pairs reviewed; {coverage['unreviewed']} unreviewed; "
+                f"{coverage['dangling']} dangling occurrences accounted for"
+            )
+        except (CitationContractError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+            coverage_ok = False
+            coverage_detail = f"citation coverage invalid/unverified: {exc}"
+        check("cite-check-coverage", coverage_ok, coverage_detail)
 
     return {"vault_tag": vault_tag, "passed": all(c["ok"] for c in checks), "checks": checks}
 
