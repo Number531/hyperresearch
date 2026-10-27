@@ -1245,7 +1245,9 @@ class TestFinalizationContract:
         monkeypatch.chdir(vault.root)
         result = CliRunner().invoke(app, ["citecheck", "extract", tag, "--final", "--sample-rate", "1", "--json"])
         assert result.exit_code == 0, result.stdout
-        assert "docs/wiki/runs" in json.loads(result.stdout)["data"]["pairs_file"]
+        assert json.loads(result.stdout)["data"]["pairs_file"] == str(
+            vault.run_dir(tag) / "final-cite-check-pairs.json"
+        )
         finished = finish_run(vault, tag)
         assert finished["verify"]["passed"], [check for check in finished["verify"]["checks"] if not check["ok"]]
 
