@@ -39,7 +39,7 @@ def _normalized(text: str, citations: set[str]) -> str:
         text = text.replace(citation, " ")
     text = re.sub(r"\(\s*\)", " ", text)
     text = re.sub(r"\s+([.,;:!?])", r"\1", text)
-    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", text).casefold()).strip()
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFC", text)).strip()
 
 
 def _groups(ids: list[str], identities: dict[str, list[tuple[str, str]]]) -> dict[str, str]:

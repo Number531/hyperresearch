@@ -334,10 +334,16 @@ def corpus_inputs(vault, vault_tag: str, report_text: str, requirements: dict,
         if component.is_symlink():
             raise CitationContractError("corpus notes directory contains a symlink")
     mapped = {row["id"]: dict(row) for row in vault.db.execute("SELECT id, path, title, source, doi, status, type, content_type FROM notes")}
+    # Match sync's one-hop alias resolution without modifying tags or notes.
+    # DB tags already contain sync's resolved value; resolving those a second
+    # time could incorrectly traverse an alias chain that native sync did not.
+    alias_map = {row["alias"]: row["canonical"] for row in vault.db.execute("SELECT alias, canonical FROM tag_aliases")}
+    scope = vault_tag.lower()
+    scope = alias_map.get(scope, scope)
     db_tags: dict[str, set[str]] = {}
     for row in vault.db.execute("SELECT note_id, tag FROM tags"):
         db_tags.setdefault(row["note_id"], set()).add(row["tag"])
-    tagged = {identity for identity, tags in db_tags.items() if vault_tag.lower() in tags}
+    tagged = {identity for identity, tags in db_tags.items() if scope in tags}
     cited = {pair["note_id"] for pair in pairs if pair["note_id"] is not None}
     bibliography = {identity for identity in parse_sources_section(report_text, vault.db).values() if identity is not None}
     required = tagged | cited | bibliography
@@ -361,6 +367,7 @@ def corpus_inputs(vault, vault_tag: str, report_text: str, requirements: dict,
             if not isinstance(raw_tags, list) or any(not isinstance(tag, str) for tag in raw_tags):
                 raise ValueError("frontmatter tags must be strings")
             tags = sorted({tag.lower().strip() for tag in raw_tags})
+            canonical_tags = {alias_map.get(tag, tag) for tag in tags}
             raw_id = data.get("id", "")
             if not isinstance(raw_id, str):
                 raise ValueError("frontmatter id must be a string")
@@ -373,7 +380,7 @@ def corpus_inputs(vault, vault_tag: str, report_text: str, requirements: dict,
             metadata.update(id=identity, tags=tags)
         except (UnicodeError, ValueError, yaml.YAMLError) as exc:
             raise CitationContractError("corpus disk metadata is unreadable; explicit sync/repair is required") from exc
-        relevant = identity in required or vault_tag.lower() in tags
+        relevant = identity in required or scope in canonical_tags
         if not relevant:
             continue
         if identity in disk:
@@ -382,7 +389,7 @@ def corpus_inputs(vault, vault_tag: str, report_text: str, requirements: dict,
         row = mapped.get(identity)
         if (row is None or row["path"] != relative or any(row[key] != metadata[key] for key in (
                 "title", "source", "doi", "status", "type", "content_type"))
-                or (vault_tag.lower() in tags) != (identity in tagged)):
+                or (scope in canonical_tags) != (identity in tagged)):
             raise CitationContractError("corpus disk/DB metadata or tagged membership drift; explicit sync is required")
         disk[identity] = metadata
         required.add(identity)

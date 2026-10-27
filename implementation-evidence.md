@@ -165,3 +165,24 @@ Final P2-REGRESSION (`python -m pytest tests/test_core/ -q`) passed,73.422s;
 P2-LINT passed,0.137s (`checks/P2/close/`). No new core failure against phase
 baseline. Independent audit follows the local checkpoint. Originality,
 relevance, semantic support and reviewer independence remain recorded judgments.
+
+P2 initial checkpoint: `6f94ee4f565663e5f68c51da063729aec07224a7`.
+Fresh auditor `semantic_p2_phase_audit` reviewed the full range and read its
+independent clean-checkpoint probe receipt: 61 passed, exit0,4.172s. It closed
+P1-Q-LONG: current long-quote checks fixed, legacy diagnostic unchanged.
+Additional auditor-selected tests reproduced two major false-rejection defects:
+P2-SI-CASE, mW/MW and Aa/aa facts collapsed to29/30 by casefold; and
+P2-TAG-ALIAS, native-synced tag alias falsely reported metadata drift.
+All3 new cases were red in0.932s (`checks/P2/audit-red/CASE-AND-ALIAS/`).
+P2 is not accepted while these findings remain. First bounded correction only:
+preserve meaningful case/NFC while retaining exact-repeat/key dedup, and apply
+native one-hop tag alias resolution read-only. No new authority or exception.
+A separate correction checkpoint, affected gates and fresh audit are required.
+
+First correction candidate for both P2 findings: NFC/case-preserving fact
+identity and native one-hop alias comparisons, with exact-repeat/citation/key
+dedup and unsynced-change refusal retained. Positive alias scopes and unsynced
+negative fixtures also assert zero database changes. P2-REGRESSION passed,
+79.807s; P2-LINT passed,0.201s (`checks/P2/correction1/`). No source/test changes
+after these gates. This is one successful local correction candidate, pending
+fresh independent closure; neither finding is waived or reclassified.

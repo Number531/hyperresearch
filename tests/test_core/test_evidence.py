@@ -105,6 +105,52 @@ def test_reviewed_paraphrase_identity_is_deduplicated():
         _validate(case)
 
 
+@pytest.mark.parametrize("first,second", [
+    ("The measured power was 1 mW.", "The measured power was 1 MW."),
+    ("The documented API method is Aa.", "The documented API method is aa."),
+])
+def test_meaningful_case_distinguishes_reviewed_atomic_propositions(first, second):
+    case = _case()
+    assertions = case[1]["units"][0]["assertions"]
+    assertions[0]["text"], assertions[1]["text"] = first, second
+    assert case[2]["propositions"][0]["proposition_key"] != case[2]["propositions"][1]["proposition_key"]
+    assert _validate(case)["supported_atomic_units"] == 30
+
+
+@pytest.mark.parametrize("run_scope", ["canonical-run", "run-alias"])
+def test_synced_current_tag_alias_is_a_valid_read_only_corpus_member(tmp_vault, run_scope):
+    from hyperresearch.core.citation_contracts import corpus_inputs
+    from hyperresearch.core.note import write_note
+    from hyperresearch.core.sync import compute_sync_plan, execute_sync
+
+    tmp_vault.db.execute("INSERT INTO tag_aliases (alias, canonical) VALUES (?, ?)", ("run-alias", "canonical-run"))
+    tmp_vault.db.commit()
+    write_note(tmp_vault.notes_dir, "Aliased Original", body="A synthetic adequately captured original body.", tags=["run-alias"])
+    execute_sync(tmp_vault, compute_sync_plan(tmp_vault, force=True))
+    assert tmp_vault.db.execute("SELECT tag FROM tags WHERE note_id = 'aliased-original'").fetchone()["tag"] == "canonical-run"
+    before = tmp_vault.db.total_changes
+    corpus = corpus_inputs(tmp_vault, run_scope, "", {"gear": "full", "source_min": 1, "claims_min": 0}, [])
+    assert [member["note_id"] for member in corpus["members"]] == ["aliased-original"]
+    assert corpus["members"][0]["membership"] == ["tagged"]
+    assert tmp_vault.db.total_changes == before
+
+
+def test_unsynced_current_tag_alias_still_fails_closed_without_writes(tmp_vault):
+    from hyperresearch.core.citation_contracts import corpus_inputs
+    from hyperresearch.core.note import write_note
+    from hyperresearch.core.sync import compute_sync_plan, execute_sync
+
+    tmp_vault.db.execute("INSERT INTO tag_aliases (alias, canonical) VALUES (?, ?)", ("run-alias", "canonical-run"))
+    tmp_vault.db.commit()
+    path = write_note(tmp_vault.notes_dir, "Unsynced Aliased Original", body="A captured original body.", tags=["other-run"])
+    execute_sync(tmp_vault, compute_sync_plan(tmp_vault, force=True))
+    path.write_text(path.read_text().replace("- other-run", "- run-alias"))
+    before = tmp_vault.db.total_changes
+    with pytest.raises(CitationContractError, match="drift"):
+        corpus_inputs(tmp_vault, "canonical-run", "", {"gear": "full", "source_min": 1, "claims_min": 0}, [])
+    assert tmp_vault.db.total_changes == before
+
+
 def test_different_citation_markers_do_not_make_identical_atomic_facts_distinct():
     case = _case()
     for index, assertion in enumerate(case[1]["units"][0]["assertions"]):
