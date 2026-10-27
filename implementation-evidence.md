@@ -186,3 +186,11 @@ negative fixtures also assert zero database changes. P2-REGRESSION passed,
 79.807s; P2-LINT passed,0.201s (`checks/P2/correction1/`). No source/test changes
 after these gates. This is one successful local correction candidate, pending
 fresh independent closure; neither finding is waived or reclassified.
+
+Correction checkpoint: `8ca38f20175469de55bea60e194030b77779cd74`.
+The fresh re-auditor requested two additional permanent controls (tests only):
+native a→b→c aliases stay one-hop without database retagging, and NFC/NFD
+spellings of the same fact still deduplicate. Both passed before their test-only
+checkpoint; Ruff passed. Product code remains identical to8ca38f2. The next
+clean-checkpoint auditor selection includes these controls and all relevant
+evidence/whole-report regressions before acceptance.

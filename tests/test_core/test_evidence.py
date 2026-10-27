@@ -117,6 +117,20 @@ def test_meaningful_case_distinguishes_reviewed_atomic_propositions(first, secon
     assert _validate(case)["supported_atomic_units"] == 30
 
 
+def test_canonically_equivalent_nfc_nfd_propositions_collapse_despite_distinct_keys():
+    import unicodedata
+
+    case = _case()
+    first = "The documented name is Caf\u00e9."
+    second = unicodedata.normalize("NFD", first)
+    assert first != second and unicodedata.normalize("NFC", second) == first
+    assertions = case[1]["units"][0]["assertions"]
+    assertions[0]["text"], assertions[1]["text"] = first, second
+    assert case[2]["propositions"][0]["proposition_key"] != case[2]["propositions"][1]["proposition_key"]
+    with pytest.raises(CitationContractError, match=r"29/30 supported atomic units"):
+        _validate(case)
+
+
 @pytest.mark.parametrize("run_scope", ["canonical-run", "run-alias"])
 def test_synced_current_tag_alias_is_a_valid_read_only_corpus_member(tmp_vault, run_scope):
     from hyperresearch.core.citation_contracts import corpus_inputs
@@ -149,6 +163,27 @@ def test_unsynced_current_tag_alias_still_fails_closed_without_writes(tmp_vault)
     with pytest.raises(CitationContractError, match="drift"):
         corpus_inputs(tmp_vault, "canonical-run", "", {"gear": "full", "source_min": 1, "claims_min": 0}, [])
     assert tmp_vault.db.total_changes == before
+
+
+def test_native_alias_chain_is_resolved_once_without_retagging_database(tmp_vault):
+    from hyperresearch.core.citation_contracts import corpus_inputs
+    from hyperresearch.core.note import write_note
+    from hyperresearch.core.sync import compute_sync_plan, execute_sync
+
+    tmp_vault.db.executemany("INSERT INTO tag_aliases (alias, canonical) VALUES (?, ?)", [("a", "b"), ("b", "c")])
+    tmp_vault.db.commit()
+    write_note(tmp_vault.notes_dir, "One Hop Original", body="An authored original body for alias-chain validation.", tags=["a"])
+    execute_sync(tmp_vault, compute_sync_plan(tmp_vault, force=True))
+    assert tmp_vault.db.execute("SELECT tag FROM tags WHERE note_id = 'one-hop-original'").fetchone()["tag"] == "b"
+    before = tmp_vault.db.total_changes
+    requirements = {"gear": "full", "source_min": 0, "claims_min": 0}
+    first_hop = corpus_inputs(tmp_vault, "a", "", requirements, [])
+    assert [member["note_id"] for member in first_hop["members"]] == ["one-hop-original"]
+    assert tmp_vault.db.total_changes == before
+    second_hop = corpus_inputs(tmp_vault, "c", "", requirements, [])
+    assert second_hop["members"] == []
+    assert tmp_vault.db.total_changes == before
+    assert tmp_vault.db.execute("SELECT tag FROM tags WHERE note_id = 'one-hop-original'").fetchone()["tag"] == "b"
 
 
 def test_different_citation_markers_do_not_make_identical_atomic_facts_distinct():
