@@ -85,7 +85,7 @@ Read source bodies, not just frontmatter or extracted/model claims. Every result
 
 ## Step 14.5.3 — Second patcher pass
 
-Append the dangling-citation findings (from 14.5.1) to the envelope's `findings` array, then reuse the step 14 patching machinery: spawn ONE `hyperresearch-patcher` (<% if platform == "codex" %>read + patch only<% else %>tool-locked Read + Edit<% endif %>) with `research/runs/<vault_tag>/cite-check-findings.json` as its findings input and `research/runs/<vault_tag>/cite-check-patch-log.json` pre-stubbed:
+Use the validated merged envelope from 14.5.2, with each dangling finding already included exactly once; do not append those findings again. Reuse the step 14 patching machinery: spawn ONE `hyperresearch-patcher` (<% if platform == "codex" %>read + patch only<% else %>tool-locked Read + Edit<% endif %>) with `research/runs/<vault_tag>/cite-check-findings.json` as its findings input and `research/runs/<vault_tag>/cite-check-patch-log.json` pre-stubbed:
 
 ```json
 {"schema_version": 1, "findings_report_revision": "<copy original findings revision>", "reviewed_report_revision": null, "resolutions": [], "total_findings": 0, "applied": [], "skipped": [], "conflicts": [], "orchestrator_escalated": []}

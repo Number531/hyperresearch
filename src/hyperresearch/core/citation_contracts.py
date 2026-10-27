@@ -275,10 +275,25 @@ def source_input(vault, note_id: str, cache: dict | None = None) -> tuple[dict, 
         pass
     else:
         snapshot["revision"] = report_revision(raw)
-        from hyperresearch.core.frontmatter import parse_frontmatter
+        from hyperresearch.core.frontmatter import FRONTMATTER_RE, parse_frontmatter
 
         try:
-            _, body = parse_frontmatter(raw.decode("utf-8-sig"))
+            text = raw.decode("utf-8-sig")
+            # The shared parser deliberately returns the original text for
+            # non-mapping YAML, and treats unclosed frontmatter as plain text.
+            # Those diagnostic fallbacks must never qualify metadata as a
+            # citation body. Keep its boundary/parser, with a scoped guard.
+            if re.match(r"^---(?:[ \t]*\r?\n|[ \t]*\Z)", text):
+                frontmatter = FRONTMATTER_RE.match(text)
+                if frontmatter is None:
+                    raise ValueError("unclosed source frontmatter")
+                closing_line = text[frontmatter.end(1) + 1:].splitlines()[0]
+                if closing_line.strip() != "---":
+                    raise ValueError("malformed source frontmatter delimiter")
+                metadata = yaml.safe_load(frontmatter.group(1))
+                if metadata is not None and not isinstance(metadata, dict):
+                    raise ValueError("source frontmatter must be a mapping")
+            _, body = parse_frontmatter(text)
         except (UnicodeError, ValueError, yaml.YAMLError):
             body = None
         else:
@@ -402,6 +417,8 @@ def validate_coverage(pairs_payload: object, findings_payload: object, vault) ->
             failures.add(identity)
             if item is None or item["verdict"] != verdict:
                 raise CitationContractError("negative result requires matching same-verdict finding")
+            if (verdict == "wrong-source" or (verdict == "unsupported" and pair["numbers"])) and item["severity"] != "critical":
+                raise CitationContractError("wrong-source and unsupported numeric results require critical findings")
     if seen != selected_set:
         raise CitationContractError("results dropped selected pair_id(s)")
     expected_findings = failures | {pair["pair_id"] for pair in routed if pair["note_id"] is None}

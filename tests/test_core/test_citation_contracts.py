@@ -354,6 +354,90 @@ def test_positive_passages_cannot_come_from_frontmatter(coverage_artifacts, verd
         validate_coverage(pairs, findings, vault)
 
 
+@pytest.mark.parametrize("raw", [
+    b"---\nmetadata-only claim\n---\n",
+    b"---\n- metadata-only claim\n---\n",
+    b"---\nclaim: metadata-only claim\n",
+    b"---\nclaim: [metadata-only claim\n---\n",
+    b"---\nclaim: metadata-only claim\n---metadata-only claim\n",
+])
+@pytest.mark.parametrize("verdict", ["supported", "partially-supported"])
+def test_invalid_frontmatter_cannot_become_positive_body_evidence(seeded_vault, raw, verdict):
+    from hyperresearch.core.citecheck import write_pairs_file
+
+    vault = seeded_vault
+    row = vault.db.execute("SELECT path FROM notes WHERE id = 'python-async-patterns'").fetchone()
+    (vault.root / row["path"]).write_bytes(raw)
+    report = vault.notes_dir / "metadata-coverage.md"
+    report.write_text("The source makes a bounded claim [[python-async-patterns]].", encoding="utf-8")
+    pairs = write_pairs_file(vault, "metadata-coverage", report, coverage_mode="comprehensive")
+    pair = pairs["pairs"][0]
+    result = {"pair_id": pair["pair_id"], "verdict": verdict,
+              "source_revision": pair["source_input"]["revision"],
+              "source_excerpt": "metadata-only claim", "evidence": "Attempted metadata-only positive."}
+    findings = {"schema_version": 1, "report_revision": pairs["report_revision"],
+                "selected_pair_ids": pairs["selected_pair_ids"], "results": [result],
+                "findings": [] if verdict == "supported" else [_negative(pair, verdict)]}
+    with pytest.raises(CitationContractError, match="cannot establish support"):
+        validate_coverage(pairs, findings, vault)
+    assert pair["source_input"]["revision"] == report_revision(raw)
+    assert pair["source_input"]["body_status"] in {"empty", "unavailable"}
+    # A safely read but invalid metadata envelope still permits an honest
+    # negative result, followed by claim removal and ordinary resolution.
+    result.update(verdict="unsupported", source_excerpt=None, evidence="No parsed source body is available.")
+    findings["findings"] = [_negative(pair)]
+    assert validate_coverage(pairs, findings, vault)["reviewed"] == 1
+
+
+@pytest.mark.parametrize(("claim", "verdict"), [
+    ("The source states 255 items", "unsupported"),
+    ("The source states +255 items", "unsupported"),
+    ("The source states \u2212255 items", "unsupported"),
+    ("The source discusses concurrent I/O", "wrong-source"),
+])
+@pytest.mark.parametrize("severity", ["minor", "major"])
+def test_declared_critical_result_policy_cannot_be_downgraded(seeded_vault, claim, verdict, severity):
+    from hyperresearch.core.citecheck import write_pairs_file
+
+    vault = seeded_vault
+    report = vault.notes_dir / "severity.md"
+    report.write_text(f"{claim} [[python-async-patterns]].", encoding="utf-8")
+    pairs = write_pairs_file(vault, "severity", report, coverage_mode="comprehensive")
+    pair = pairs["pairs"][0]
+    findings = {"schema_version": 1, "report_revision": pairs["report_revision"],
+                "selected_pair_ids": pairs["selected_pair_ids"], "findings": [_negative(pair, verdict, severity)],
+                "results": [{"pair_id": pair["pair_id"], "verdict": verdict,
+                             "source_revision": pair["source_input"]["revision"],
+                             "source_excerpt": "Python's async/await syntax enables concurrent I/O.",
+                             "evidence": "Synthetic negative result for structural severity validation."}]}
+    with pytest.raises(CitationContractError, match="critical"):
+        validate_coverage(pairs, findings, vault)
+    findings["findings"][0]["severity"] = "critical"
+    assert validate_coverage(pairs, findings, vault)["reviewed"] == 1
+
+
+@pytest.mark.parametrize(("claim", "verdict"), [
+    ("The source discusses concurrent I/O", "unsupported"),
+    ("The source discusses an increase in concurrent I/O", "unsupported"),
+    ("The source states 255 items", "partially-supported"),
+])
+def test_structural_severity_policy_preserves_nonnumeric_and_partial_findings(seeded_vault, claim, verdict):
+    from hyperresearch.core.citecheck import write_pairs_file
+
+    vault = seeded_vault
+    report = vault.notes_dir / "noncritical.md"
+    report.write_text(f"{claim} [[python-async-patterns]].", encoding="utf-8")
+    pairs = write_pairs_file(vault, "noncritical", report, coverage_mode="comprehensive")
+    pair = pairs["pairs"][0]
+    findings = {"schema_version": 1, "report_revision": pairs["report_revision"],
+                "selected_pair_ids": pairs["selected_pair_ids"], "findings": [_negative(pair, verdict, "major")],
+                "results": [{"pair_id": pair["pair_id"], "verdict": verdict,
+                             "source_revision": pair["source_input"]["revision"],
+                             "source_excerpt": "Python's async/await syntax enables concurrent I/O.",
+                             "evidence": "Recorded noncritical result with a literal source-body passage."}]}
+    assert validate_coverage(pairs, findings, vault)["reviewed"] == 1
+
+
 def test_comprehensive_selection_is_not_automatically_reviewed(seeded_vault):
     from hyperresearch.core.citecheck import write_pairs_file
 
@@ -373,7 +457,7 @@ def test_each_negative_result_has_exact_matching_finding(coverage_artifacts, ver
     result = findings["results"][0]
     result["verdict"] = verdict
     pair = next(p for p in pairs["pairs"] if p["pair_id"] == result["pair_id"])
-    findings["findings"] = [_negative(pair, verdict)]
+    findings["findings"] = [_negative(pair, verdict, "critical" if verdict == "wrong-source" else "major")]
     assert validate_coverage(pairs, findings, vault)["reviewed"] == 3
 
 
