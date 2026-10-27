@@ -194,3 +194,12 @@ spellings of the same fact still deduplicate. Both passed before their test-only
 checkpoint; Ruff passed. Product code remains identical to8ca38f2. The next
 clean-checkpoint auditor selection includes these controls and all relevant
 evidence/whole-report regressions before acceptance.
+
+Fresh re-auditor `semantic_p2_remediation_audit` reviewed clean test checkpoint
+`ae9ba1c89c85ee36e904ffce4139e42fed996503`, the full P2 range and first
+correction. Its independent selection passed131 cases, exit0,5.896s on that
+exact clean HEAD (`checks/P2/reaudit/INDEPENDENT-PROBES/`). It closed
+P2-SI-CASE, P2-TAG-ALIAS and sustained P1-Q-LONG closure, with zero open
+critical/major/minor findings. Parent reconciled the actual receipts and
+accepted P2. All three phases are now accepted locally; final aggregate
+comparison and final independent outcome verification remain outstanding.
