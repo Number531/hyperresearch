@@ -11,6 +11,9 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
+
+import yaml
 
 CONTRACT_VERSION = 1
 _REVISION_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -234,3 +237,209 @@ def validate_resolutions(
     missing = criticals - resolved
     if missing:
         raise CitationContractError(f"{len(missing)} critical finding(s) lack reviewed resolution")
+
+
+def source_input(vault, note_id: str, cache: dict | None = None) -> tuple[dict, str | None]:
+    """Snapshot a current DB-mapped, contained note and its parsed source body.
+
+    Paths from artifacts are never used to open files. Invalid paths are hard
+    errors; only safe contained read/parse failures become unavailable bodies.
+    Cache per unique note within one extraction/validation, never across runs.
+    """
+    if cache is not None and note_id in cache:
+        return cache[note_id]
+    row = vault.db.execute("SELECT path FROM notes WHERE id = ?", (note_id,)).fetchone()
+    if row is None:
+        raise CitationContractError("source note_id has no current DB path")
+    relative = Path(_string(row["path"], "source DB path"))
+    if relative.is_absolute() or ".." in relative.parts:
+        raise CitationContractError("source path must be contained in vault notes directory")
+    root, notes_root = vault.root.resolve(), vault.notes_dir.resolve()
+    path = root / relative
+    try:
+        notes_root.relative_to(root)
+        path.resolve().relative_to(root)
+        path.resolve().relative_to(notes_root)
+    except (ValueError, OSError, RuntimeError) as exc:
+        raise CitationContractError("source path escapes vault root/notes directory") from exc
+    component = root
+    for part in relative.parts:
+        component /= part
+        if component.is_symlink():
+            raise CitationContractError("source path contains a symlink")
+    snapshot = {"path": relative.as_posix(), "revision": None, "body_status": "unavailable"}
+    body = None
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        pass
+    else:
+        snapshot["revision"] = report_revision(raw)
+        from hyperresearch.core.frontmatter import parse_frontmatter
+
+        try:
+            _, body = parse_frontmatter(raw.decode("utf-8-sig"))
+        except (UnicodeError, ValueError, yaml.YAMLError):
+            body = None
+        else:
+            snapshot["body_status"] = "available" if body.strip() else "empty"
+    result = snapshot, body
+    if cache is not None:
+        cache[note_id] = result
+    return result
+
+
+def _identities(value: object, field: str) -> list[str]:
+    if not isinstance(value, list):
+        raise CitationContractError(f"{field} must be an array of pair IDs")
+    if any(not isinstance(item, str) or not _PAIR_RE.fullmatch(item) for item in value):
+        raise CitationContractError(f"{field} contains an invalid pair_id")
+    if len(set(value)) != len(value):
+        raise CitationContractError(f"duplicate {field}")
+    return value
+
+
+def validate_coverage(pairs_payload: object, findings_payload: object, vault) -> dict:
+    """Reconcile exact selected results, negative findings, and source inputs.
+
+    This validates recorded selected work and literal body passages, not
+    semantic entailment, original-source qualification, or producer independence.
+    The original report may have been patched; final-byte ordering is separate.
+    """
+    pairs = parse_pairs(pairs_payload)
+    findings = parse_findings(findings_payload)
+    bind_findings(findings, pairs)
+    # Require results explicitly even when the correct selected set is empty.
+    results = _records(findings_payload.get("results"), "results")
+    mode = _enum(pairs_payload.get("coverage_mode"), {"sampled", "comprehensive"}, "coverage_mode")
+    sampling = pairs_payload.get("sampling")
+    if not isinstance(sampling, dict) or sampling.get("method") != "deterministic-floor-v1":
+        raise CitationContractError("sampling requires deterministic-floor-v1 method")
+    rate = sampling.get("weak_sample_rate")
+    if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+        raise CitationContractError("weak_sample_rate must be a number")
+    from hyperresearch.core.citecheck import sample_needs_llm, sentence_routing
+
+    routed = []
+    for index, pair in enumerate(pairs.pairs):
+        if pair["pair_index"] != index:
+            raise CitationContractError("pairs must retain contiguous original extraction order")
+        numbers, strong = sentence_routing(pair["sentence"])
+        expected_verdict = "dangling" if pair["note_id"] is None else "needs-llm"
+        if (type(pair.get("strong")) is not bool or pair["strong"] != strong
+                or pair.get("numbers") != numbers or pair.get("verdict") != expected_verdict):
+            raise CitationContractError("pair routing differs from its original sentence/citation")
+        routed.append(pair)
+    expected = [pair["pair_id"] for pair in sample_needs_llm(routed, rate)]
+    if mode == "comprehensive" and rate != 1:
+        raise CitationContractError("comprehensive coverage requires weak_sample_rate 1")
+    selected = _identities(pairs_payload.get("selected_pair_ids"), "selected_pair_ids")
+    if selected != expected:
+        raise CitationContractError("selected_pair_ids differ from declared sampling")
+    selected_set = set(selected)
+    remainder = [pair["pair_id"] for pair in routed
+                 if pair["note_id"] is not None and pair["pair_id"] not in selected_set]
+    if _identities(pairs_payload.get("unreviewed_pair_ids"), "unreviewed_pair_ids") != remainder:
+        raise CitationContractError("unreviewed_pair_ids differ from actual unreviewed remainder")
+    if mode == "comprehensive" and remainder:
+        raise CitationContractError("comprehensive coverage has unreviewed pairs")
+    sampled = _records(pairs_payload.get("sampled_for_llm"), "sampled_for_llm")
+    if sampled != [pair for pair in routed if pair["pair_id"] in selected_set]:
+        raise CitationContractError("sampled_for_llm differs from exact selected pairs")
+    dangling = [pair for pair in routed if pair["note_id"] is None]
+    if _records(pairs_payload.get("dangling"), "dangling") != dangling:
+        raise CitationContractError("dangling array differs from every extracted dangling occurrence")
+    summary = pairs_payload.get("summary")
+    counts = {"total": len(routed), "dangling": len(dangling),
+              "needs_llm": len(routed) - len(dangling),
+              "selected": len(selected), "unreviewed": len(remainder)}
+    if not isinstance(summary, dict) or any(
+        type(summary.get(key)) is not int or summary[key] != count for key, count in counts.items()
+    ):
+        raise CitationContractError("summary counts differ from actual selected/unreviewed coverage")
+    if _identities(findings_payload.get("selected_pair_ids"), "results selected_pair_ids") != selected:
+        raise CitationContractError("results selected_pair_ids do not cover exact selected set")
+    by_id = {pair["pair_id"]: pair for pair in routed}
+    findings_by_pair = {item["pair_id"]: item for item in findings.findings}
+    source_cache: dict = {}
+    for pair in routed:
+        if pair["note_id"] is None:
+            item = findings_by_pair.get(pair["pair_id"])
+            if item is None or item["verdict"] != "dangling" or item["severity"] != "critical":
+                raise CitationContractError("every dangling occurrence requires its own critical finding")
+        else:
+            current, _ = source_input(vault, pair["note_id"], source_cache)
+            if pair.get("source_input") != current:
+                raise CitationContractError("source_input is stale or differs from current DB-mapped note path/body")
+    seen: set[str] = set()
+    failures: set[str] = set()
+    for result in results:
+        identity = _string(result.get("pair_id"), "result pair_id")
+        if identity not in selected_set:
+            raise CitationContractError("result references unknown/unselected pair_id")
+        if identity in seen:
+            raise CitationContractError("duplicate result pair_id")
+        seen.add(identity)
+        verdict = _enum(result.get("verdict"), {"supported", "partially-supported", "unsupported", "wrong-source"}, "result verdict")
+        _string(result.get("evidence"), "result evidence")
+        pair = by_id[identity]
+        snapshot, body = source_input(vault, pair["note_id"], source_cache)
+        if "source_revision" not in result or result["source_revision"] != snapshot["revision"]:
+            raise CitationContractError("result source_revision is stale/unrelated")
+        excerpt = result.get("source_excerpt")
+        if snapshot["body_status"] == "available":
+            if _string(excerpt, "result source_excerpt") not in body:
+                raise CitationContractError("result source_excerpt is not a literal source-body passage")
+        elif verdict in {"supported", "partially-supported"}:
+            raise CitationContractError("empty/unavailable source body cannot establish support")
+        elif excerpt is not None:
+            raise CitationContractError("empty/unavailable body requires null/absent source_excerpt")
+        item = findings_by_pair.get(identity)
+        if verdict == "supported":
+            if item is not None:
+                raise CitationContractError("supported result cannot also have a finding")
+        else:
+            failures.add(identity)
+            if item is None or item["verdict"] != verdict:
+                raise CitationContractError("negative result requires matching same-verdict finding")
+    if seen != selected_set:
+        raise CitationContractError("results dropped selected pair_id(s)")
+    expected_findings = failures | {pair["pair_id"] for pair in routed if pair["note_id"] is None}
+    if set(findings_by_pair) != expected_findings:
+        raise CitationContractError("findings include unselected/unmatched negative records")
+    return {"coverage_mode": mode, "selected": len(selected), "reviewed": len(seen),
+            "unreviewed": len(remainder), "dangling": len(expected_findings - failures)}
+
+
+def merge_findings_shards(pairs_payload: object, shards: list[object], vault) -> dict:
+    """Retain all disjoint shard IDs/results/evidence, then validate their union.
+
+    Include the mandatory dangling findings in one shard (which may have an
+    empty selected list). Never merge only findings and discard supported work.
+    """
+    pairs = parse_pairs(pairs_payload)
+    if not isinstance(shards, list):
+        raise CitationContractError("shards must be an array of findings envelopes")
+    merged = {"schema_version": CONTRACT_VERSION, "report_revision": pairs.report_revision,
+              "selected_pair_ids": [], "results": [], "findings": []}
+    seen: set[str] = set()
+    for shard in shards:
+        parsed = parse_findings(shard)
+        bind_findings(parsed, pairs)
+        ids = _identities(shard.get("selected_pair_ids"), "shard selected_pair_ids")
+        if seen & set(ids):
+            raise CitationContractError("duplicate selected pair_id across shards")
+        seen.update(ids)
+        records = _records(shard.get("results"), "shard results")
+        result_ids = _identities([item.get("pair_id") for item in records], "shard result pair_ids")
+        if set(result_ids) != set(ids):
+            raise CitationContractError("shard results differ from its selected_pair_ids")
+        merged["selected_pair_ids"].extend(ids)
+        merged["results"].extend(records)
+        merged["findings"].extend(parsed.findings)
+    # Shards may finish in any order; use the extraction's canonical ID order.
+    merged["selected_pair_ids"] = [identity for identity in pairs_payload.get("selected_pair_ids", []) if identity in seen]
+    if set(merged["selected_pair_ids"]) != seen:
+        raise CitationContractError("shard references unknown/unselected pair_id")
+    validate_coverage(pairs_payload, merged, vault)
+    return merged
